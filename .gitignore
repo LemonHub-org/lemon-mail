@@ -1,5 +1,8 @@
 node_modules
 dist
 .env
+.env.*
+.dev.vars
 *.tsbuildinfo
 .wrangler
+.turnstile-secret.tmp

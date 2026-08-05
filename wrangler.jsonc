@@ -13,9 +13,17 @@
   "observability": {
     "enabled": true
   },
+  "triggers": {
+    "crons": ["0 * * * *"]
+  },
   "vars": {
     "LEMONMAIL_DOMAIN": "lemonhub.net",
-    "MAILBOX_QUOTA_MB": "10"
+    "MAILBOX_QUOTA_MB": "10",
+    "MAILBOX_MAX_TOTAL": "500",
+    "MAILBOX_CREATE_PER_IP_HOUR": "3",
+    "LOGIN_PER_IP_WINDOW": "30",
+    "LOGIN_PER_ADDR_WINDOW": "10",
+    "EMAIL_MAX_AGE_DAYS": "0"
   },
   "d1_databases": [
     {

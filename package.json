@@ -19,10 +19,12 @@
     "hono": "^4.8.5",
     "postal-mime": "^2.7.5",
     "vue": "^3.5.18",
+    "vue-i18n": "11.1.9",
     "zod": "^4.0.17"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260804.1",
+    "@intlify/devtools-types": "^11.4.8",
     "@tailwindcss/vite": "^4.1.11",
     "@types/node": "^24.1.0",
     "@vitejs/plugin-vue": "^6.0.1",
