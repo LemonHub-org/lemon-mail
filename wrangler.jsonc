@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "lemon-mail",
+  "main": "server/worker.ts",
+  "compatibility_date": "2026-08-05",
+  "account_id": "e28c02029d0b99ca5d7f0baf95de7519",
+  "routes": [
+    {
+      "pattern": "api.lemonhub.net",
+      "custom_domain": true
+    }
+  ],
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "LEMONMAIL_DOMAIN": "lemonhub.net",
+    "MAILBOX_QUOTA_MB": "10"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "lemon-mail",
+      "database_id": "334aabad-f83c-42e5-8a60-9606a314ddb6"
+    }
+  ]
+}

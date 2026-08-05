@@ -4,27 +4,37 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently \"vite\" \"tsx watch server/index.ts\"",
+    "dev": "concurrently \"vite\" \"wrangler dev\"",
     "build": "vue-tsc -b && vite build",
-    "start": "tsx server/index.ts",
-    "typecheck": "vue-tsc -b --pretty false"
+    "typecheck": "vue-tsc -b --pretty false",
+    "deploy": "npm run build && npm run deploy:worker && npm run deploy:pages",
+    "deploy:worker": "wrangler deploy",
+    "deploy:pages": "wrangler pages deploy dist --project-name lemon-mail --branch main",
+    "db:migrate": "wrangler d1 migrations apply lemon-mail --remote",
+    "db:migrate:local": "wrangler d1 migrations apply lemon-mail --local"
   },
   "dependencies": {
-    "@hono/node-server": "^1.19.0",
     "@hono/zod-validator": "^0.7.3",
+    "dompurify": "^3.4.13",
     "hono": "^4.8.5",
+    "postal-mime": "^2.7.5",
     "vue": "^3.5.18",
     "zod": "^4.0.17"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260804.1",
     "@tailwindcss/vite": "^4.1.11",
     "@types/node": "^24.1.0",
     "@vitejs/plugin-vue": "^6.0.1",
     "concurrently": "^9.2.0",
     "tailwindcss": "^4.1.11",
-    "tsx": "^4.20.3",
     "typescript": "^5.8.3",
     "vite": "^7.0.6",
-    "vue-tsc": "^3.0.5"
+    "vue-tsc": "^3.0.5",
+    "wrangler": "^4.118.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "workerd@1.20260730.1": true
   }
 }
