@@ -37,6 +37,7 @@ CREATE INDEX idx_aliases_mailbox ON aliases(mailbox_id);
 
 - 长度 8，字符集 `[a-z2-9]`（排除易混淆的 `0 o 1 l i`），空间 32^8 ≈ 1.1e12。
 - 生成后查重：`mailboxes`（主邮箱）+ `aliases`（含已删除）+ `blocked_prefixes`（保留前缀），冲突则重试（最多 5 次）。
+- 5 次仍冲突（概率可忽略）→ 500 `alias_generation_failed`。
 - 统一小写；域名部分由展示层拼接 `@lemonhub.net`。
 
 ## 入站投递链（server/worker.ts `handleEmail`）
