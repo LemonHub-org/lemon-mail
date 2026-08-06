@@ -200,6 +200,18 @@ export default {
       label: '打标签',
     },
   },
+  sessions: {
+    title: '登录设备',
+    hint: '其他设备上的会话可在此踢出；当前会话不可撤销（请使用登出）。',
+    empty: '暂无活跃会话',
+    current: '当前设备',
+    started: '登录于 {time}',
+    expires: '有效期至 {time}',
+    revoke: '踢出',
+    loadFailed: '加载会话失败',
+    revokeFailed: '踢出失败',
+  },
+
   sender: {
     unknown: '未知发件人',
   },

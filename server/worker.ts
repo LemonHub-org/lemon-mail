@@ -638,6 +638,39 @@ app.post('/api/auth/logout', sessionAuth, async (c) => {
   return c.body(null, 204)
 })
 
+app.get('/api/mailboxes/:id/sessions', sessionAuth, async (c) => {
+  if (!assertMailbox(c, c.req.param('id'))) return c.json({ code: 'forbidden' }, 403)
+  const currentToken = c.get('sessionToken')
+  const rows = await c.env.DB.prepare(
+    'SELECT token, created_at AS createdAt, expires_at AS expiresAt FROM auth_sessions WHERE mailbox_id = ? ORDER BY created_at DESC',
+  )
+    .bind(c.get('mailboxId'))
+    .all<{ token: string; createdAt: string; expiresAt: string }>()
+  const now = Date.now()
+  return c.json({
+    sessions: rows.results
+      .filter((r) => Date.parse(r.expiresAt) > now)
+      .map((r) => ({
+        id: r.token,
+        createdAt: r.createdAt,
+        expiresAt: r.expiresAt,
+        isCurrent: r.token === currentToken,
+      })),
+  })
+})
+
+app.delete('/api/mailboxes/:id/sessions/:sessionId', sessionAuth, async (c) => {
+  if (!assertMailbox(c, c.req.param('id'))) return c.json({ code: 'forbidden' }, 403)
+  const sessionId = c.req.param('sessionId')
+  if (sessionId === c.get('sessionToken')) return c.json({ code: 'cannot_revoke_current' }, 400)
+  const res = await c.env.DB
+    .prepare('DELETE FROM auth_sessions WHERE token = ? AND mailbox_id = ?')
+    .bind(sessionId, c.get('mailboxId'))
+    .run()
+  if (res.meta.changes === 0) return c.json({ code: 'not_found' }, 404)
+  return c.json({ ok: true })
+})
+
 app.post('/api/mailboxes/:id/login', zValidator('json', loginInput), async (c) => {
   const id = c.req.param('id')
   const ip = requestClientIp(c)

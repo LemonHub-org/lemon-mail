@@ -200,6 +200,18 @@ export default {
       label: 'Label',
     },
   },
+  sessions: {
+    title: 'Active sessions',
+    hint: 'Revoke sessions on other devices; the current session cannot be revoked here (use Sign out).',
+    empty: 'No active sessions',
+    current: 'This device',
+    started: 'Started {time}',
+    expires: 'Expires {time}',
+    revoke: 'Revoke',
+    loadFailed: 'Could not load sessions',
+    revokeFailed: 'Could not revoke session',
+  },
+
   sender: {
     unknown: 'Unknown sender',
   },

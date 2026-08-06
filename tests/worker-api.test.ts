@@ -209,6 +209,67 @@ describe('登录与鉴权', () => {
   })
 })
 
+describe('会话管理', () => {
+  async function login(env: Env, localPart: string, password: string): Promise<{ token: string }> {
+    const res = await call(env, '/api/auth/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ localPart, password }),
+    }, { ip: '1.1.1.1' })
+    expect(res.status).toBe(200)
+    return (await res.json()) as { token: string }
+  }
+
+  it('列出会话（含 isCurrent）并踢出非当前会话', async () => {
+    const { env } = makeEnv()
+    const mb = await createMailbox(env, 'sess1', 'password123', { ip: '1.1.1.1' })
+    const other = await login(env, 'sess1', 'password123')
+
+    const list = await call(env, `/api/mailboxes/${mb.id}/sessions`, { headers: { authorization: `Bearer ${mb.token}` } })
+    expect(list.status).toBe(200)
+    const body = await list.json()
+    expect(body.sessions).toHaveLength(2)
+    const current = body.sessions.find((s: { isCurrent: boolean }) => s.isCurrent)
+    const otherOne = body.sessions.find((s: { isCurrent: boolean }) => !s.isCurrent)
+    expect(current.token).toBeUndefined()
+    expect(current.id).toBe(mb.token)
+    expect(otherOne.id).toBe(other.token)
+
+    const revoke = await call(env, `/api/mailboxes/${mb.id}/sessions/${otherOne.id}`, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${mb.token}` },
+    })
+    expect(revoke.status).toBe(200)
+
+    const kicked = await call(env, `/api/mailboxes/${mb.id}/emails`, { headers: { authorization: `Bearer ${other.token}` } })
+    expect(kicked.status).toBe(401)
+    const after = await call(env, `/api/mailboxes/${mb.id}/sessions`, { headers: { authorization: `Bearer ${mb.token}` } })
+    expect((await after.json()).sessions).toHaveLength(1)
+  })
+
+  it('不能撤销当前会话；撤销不存在的会话 404；跨邮箱 403', async () => {
+    const { env } = makeEnv()
+    const mb = await createMailbox(env, 'sess2', 'password123', { ip: '1.1.1.1' })
+
+    const self = await call(env, `/api/mailboxes/${mb.id}/sessions/${mb.token}`, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${mb.token}` },
+    })
+    expect(self.status).toBe(400)
+    expect((await self.json()).code).toBe('cannot_revoke_current')
+
+    const missing = await call(env, `/api/mailboxes/${mb.id}/sessions/nope`, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${mb.token}` },
+    })
+    expect(missing.status).toBe(404)
+
+    const b = await createMailbox(env, 'sess3', 'password123', { ip: '2.2.2.2', deviceId: 'db' })
+    const cross = await call(env, `/api/mailboxes/${mb.id}/sessions`, { headers: { authorization: `Bearer ${b.token}` } })
+    expect(cross.status).toBe(403)
+  })
+})
+
 describe('邮件', () => {
   it('空收件箱返回配额 0', async () => {
     const { env } = makeEnv()

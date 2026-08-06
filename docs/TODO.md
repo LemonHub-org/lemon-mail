@@ -12,7 +12,7 @@
 | **P0 安全底线** | 8 / 8 | 0 | 已实现并部署 |
 | **P1 产品完整度** | 13 / 13 | 0 | 已实现 |
 | **P2 下一阶段** | 8 / 8 | 0 | 不含发送与 R2 附件；migration `0005_p2_features` |
-| **P3 体验与工程** | 7 / 8 | 1 | P3-1 多标签页、P3-2 快捷键、P3-3 深色模式、P3-4 PWA、P3-5 自动化测试、P3-6 可观测性、P3-7 入站 reject 已修 |
+| **P3 体验与工程** | 8 / 8 | 0 | P3-1~P3-8 全部完成 |
 | **P4 反滥用** | 4 / 5 | 1 | 一人一邮箱；创建路径线上验证被 Turnstile 挡，跳过 |
 
 ---
@@ -77,7 +77,7 @@
 | P3-5 | 完成 | 自动化测试 | vitest + @vue/test-utils + jsdom；`tests/`：local-part/theme/tabs 单元 + `tests/helpers/mini-d1.ts` 内存 D1 驱动的 worker API 测试（创建/反滥用/登录/邮件流/admin），34 例全绿；`npm test` |
 | P3-6 | 完成 | 可观测性 | 结构化 JSON 日志（`wrangler tail`）：`api.request` 中间件、`api.error`、创建/拒绝/登录/入站拒绝/丢弃/失败埋点、`cron.run` 计数 |
 | P3-7 | 完成 | 入站 reject 不误报 | |
-| P3-8 | 待办 | 会话列表 | 踢其他设备 |
+| P3-8 | 完成 | 会话列表 | `GET/POST /api/mailboxes/:id/sessions` + `DELETE .../sessions/:sessionId`（踢出非当前会话）；设置面板展示登录设备 |
 
 ---
 
@@ -125,3 +125,4 @@
 | 2026-08-06 | **P3-2 快捷键扩展完成**：U/S/A/M/X/1-5 新增 + ? 帮助面板 |
 | 2026-08-06 | **P3-5 自动化测试完成**：vitest 34 例（单元 + MiniD1 worker API 集成）；`npm test` |
 | 2026-08-06 | **P3-6 可观测性完成**：结构化 JSON 日志（api.request/创建/登录/入站/cron 埋点），`wrangler tail` 验证 |
+| 2026-08-06 | **P3-8 会话列表完成**：列出活跃会话 + 踢出非当前会话；**P3 全部完成（8/8）** |

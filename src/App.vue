@@ -662,6 +662,44 @@ async function loadFilters() {
   filters.value = payload.filters ?? []
 }
 
+type SessionInfo = {
+  id: string
+  createdAt: string
+  expiresAt: string
+  isCurrent: boolean
+}
+
+const sessions = ref<SessionInfo[]>([])
+const sessionsError = ref('')
+
+async function loadSessions() {
+  if (!mailbox.value) return
+  sessionsError.value = ''
+  const response = await fetch(`${apiBase}/api/mailboxes/${mailbox.value.id}/sessions`, {
+    headers: { authorization: `Bearer ${token.value}` },
+  })
+  if (!response.ok) {
+    sessionsError.value = t('sessions.loadFailed')
+    return
+  }
+  const payload = await response.json()
+  sessions.value = payload.sessions ?? []
+}
+
+async function revokeSession(sessionId: string) {
+  if (!mailbox.value) return
+  const response = await fetch(`${apiBase}/api/mailboxes/${mailbox.value.id}/sessions/${sessionId}`, {
+    method: 'DELETE',
+    headers: { authorization: `Bearer ${token.value}` },
+  })
+  if (!response.ok) {
+    if (response.status === 401) return
+    sessionsError.value = t('sessions.revokeFailed')
+    return
+  }
+  sessions.value = sessions.value.filter((s) => s.id !== sessionId)
+}
+
 async function createFilter() {
   if (!mailbox.value) return
   filterError.value = ''
@@ -922,7 +960,10 @@ watch(landingTab, () => {
 })
 
 watch(settingsOpen, (open) => {
-  if (open) loadFilters()
+  if (open) {
+    loadFilters()
+    loadSessions()
+  }
 })
 
 watch(selectedId, async (id) => {
@@ -1839,6 +1880,24 @@ async function installApp() {
                   <p v-if="f.name" class="mt-0.5 text-ink-4">{{ f.name }}</p>
                 </div>
                 <button class="shrink-0 text-danger" type="button" @click="deleteFilter(f.id)">{{ t('filters.remove') }}</button>
+              </li>
+            </ul>
+          </section>
+          <section>
+            <h3 class="mb-1 text-sm font-semibold">{{ t('sessions.title') }}</h3>
+            <p class="mb-3 text-xs text-ink-4">{{ t('sessions.hint') }}</p>
+            <p v-if="sessionsError" class="mb-2 text-xs text-danger">{{ sessionsError }}</p>
+            <ul class="space-y-2">
+              <li v-if="sessions.length === 0" class="text-xs text-ink-5">{{ t('sessions.empty') }}</li>
+              <li v-for="s in sessions" :key="s.id" class="flex items-center justify-between gap-2 rounded-[12px] border border-line bg-surface p-3 text-xs">
+                <div class="min-w-0">
+                  <p class="font-medium text-ink">
+                    {{ t('sessions.started', { time: formatFullTime(s.createdAt) }) }}
+                    <span v-if="s.isCurrent" class="ml-1 rounded-full bg-accent/15 px-2 py-0.5 text-[10px] font-medium text-accent">{{ t('sessions.current') }}</span>
+                  </p>
+                  <p class="mt-0.5 text-ink-4">{{ t('sessions.expires', { time: formatFullTime(s.expiresAt) }) }}</p>
+                </div>
+                <button class="shrink-0 text-danger disabled:opacity-40" type="button" :disabled="s.isCurrent" @click="revokeSession(s.id)">{{ t('sessions.revoke') }}</button>
               </li>
             </ul>
           </section>
