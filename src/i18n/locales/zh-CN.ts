@@ -5,8 +5,11 @@ export default {
   },
   nav: {
     mainNav: '主导航',
+    skip: '跳至主要内容',
     login: '登录',
+    theme: '切换主题',
     create: '创建邮箱',
+    install: '安装应用',
   },
   hero: {
     badge: '你的域名，你的邮箱',
@@ -21,7 +24,7 @@ export default {
     password: '独立密码',
     hosting: '邮件托管',
     recent: '本机最近记录',
-    domain: '@lemonhub.net',
+    domain: "{'@'}lemonhub.net",
   },
   access: {
     badge: '开始使用',
@@ -60,6 +63,7 @@ export default {
     passwordLabel: '收件箱密码',
     passwordPlaceholder: '至少 8 位',
     passwordHint: '创建后无法找回，请妥善保管。前缀至少 3 个字符；RFC 保留名、知名品牌名不可用。',
+    onePerUser: '每个用户限注册一个邮箱地址。',
     inviteLabel: '邀请码',
     invitePlaceholder: '需要邀请码才能创建',
     show: '显示',
@@ -74,6 +78,8 @@ export default {
     created: '{address} 已创建，正在进入收件箱…',
   },
   how: {
+    sectionTitle: '三个步骤，各归其位',
+    sectionTagline: '从命名到托管再到掌控，每个地址都清晰独立。',
     naming: { kicker: '命名', title: '取一个名字', body: '工作、账单、社区或任何你想区分的场景。' },
     hosting: { kicker: '托管', title: '邮件直达', body: '邮件直接进入本站收件箱，不经过第三方转发。' },
     privacy: { kicker: '隐私', title: '地址不公示', body: '只有知道前缀与密码的人才能进入对应收件箱。' },
@@ -199,6 +205,10 @@ export default {
     mailbox_exists: '这个邮箱地址已经存在。',
     mailbox_limit_reached: '邮箱数量已达上限，暂不可创建。',
     invalid_invite: '邀请码无效。',
+    abuse: {
+      device_exists: '每个用户限注册一个邮箱地址，此设备已注册过。',
+      ip_limit: '该网络环境已注册过多邮箱，请更换网络后重试。',
+    },
     turnstile_failed: '人机验证未通过，请稍后重试。',
     rate_limited: '操作过于频繁，请稍后再试。',
     forbidden: '无权执行该操作。',

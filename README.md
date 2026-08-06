@@ -5,6 +5,13 @@
 - 前端：https://mail.lemonhub.net
 - API：https://api.lemonhub.net
 
+## 功能
+
+- **托管收件箱**：三栏 UI（收件箱/未读/星标/归档/回收站）、邮件详情（HTML/纯文本切换）、未读标记、FTS5 全文搜索、入站过滤器、JSON/mbox/.eml 导出
+- **安全**：每邮箱独立密码（PBKDF2）、Bearer 会话、Turnstile 人机验证、限流、配额、每小时会话清理
+- **反滥用（一人一邮箱）**：设备指纹 + IP 双重判定，管理员可解绑
+- **体验**：中英双语（i18n）、深色模式、PWA（可安装 + 离线缓存）、多标签页同步、响应式移动端适配
+
 ## 本地运行
 
 ```bash
@@ -13,7 +20,7 @@ npm run db:migrate:local   # 首次或 schema 变更后
 npm run dev
 ```
 
-网页运行在 `http://localhost:5173`，Worker API 运行在 `http://localhost:8787`（本地 D1 状态保存在 `.wrangler.state`）。
+网页运行在 `http://localhost:5173`，Worker API 运行在 `http://localhost:8787`（本地 D1 状态保存在 `.wrangler/state`）。
 
 生产环境需配置 Worker Secret `TURNSTILE_SECRET`（Cloudflare Turnstile）；未配置时本地可跳过人机校验。可选 Secret / 变量见下表。
 
@@ -22,7 +29,7 @@ npm run dev
 ```bash
 npm run db:migrate     # 应用 D1 migration 到远程数据库
 # wrangler secret put TURNSTILE_SECRET
-# 可选: wrangler secret put INVITE_CODE
+# 可选: wrangler secret put INVITE_CODE / ADMIN_TOKEN
 npm run deploy         # 构建并部署 Worker + Pages
 ```
 
@@ -30,14 +37,14 @@ npm run deploy         # 构建并部署 Worker + Pages
 
 | 方法 | 路径 | 认证 | 说明 |
 |------|------|------|------|
-| `GET` | `/api/health` | 无 | `{ ok, domain, inviteRequired, turnstileRequired }` |
-| `POST` | `/api/mailboxes` | 无 + Turnstile | 创建邮箱；可选 `inviteCode`；成功返回 `{ id, localPart, createdAt, token, expiresAt }` |
+| `GET` | `/api/health` | 无 | `{ ok, domain, inviteRequired, turnstileRequired, adminEnabled }` |
+| `POST` | `/api/mailboxes` | 无 + Turnstile | 创建邮箱；带 `device-id` header；可选 `inviteCode`；成功返回 `{ id, localPart, createdAt, token, expiresAt }` |
 | `DELETE` | `/api/mailboxes/:id` | Bearer | 删除当前会话所属邮箱（级联邮件与会话） |
 | `POST` | `/api/auth/login` | 无 + Turnstile | `{ localPart, password }` → `{ token, expiresAt, mailbox }` |
 | `POST` | `/api/auth/logout` | Bearer | 作废当前 token；`?all=1` 作废该邮箱全部会话 |
 | `POST` | `/api/mailboxes/:id/login` | 无 | 按 id 登录（内部/兼容） |
 | `POST` | `/api/mailboxes/:id/password` | Bearer | 改密；吊销全部会话并返回新 `token` |
-| `GET` | `/api/mailboxes/:id/emails` | Bearer | 列表 + `quota` + `total` + `unread` + `matchedTotal`；`?limit&offset&unread=1&q=` |
+| `GET` | `/api/mailboxes/:id/emails` | Bearer | 列表 + `quota` + `total` + `unread` + `folders` + `starred`；`?limit&offset&unread=1&folder=&q=` |
 | `GET` | `/api/mailboxes/:id/emails/:emailId` | Bearer | 详情（含 to/cc/messageId/attachments 元数据），自动标已读 |
 | `PATCH` | `/api/mailboxes/:id/emails/:emailId/read` | Bearer | `{ isRead }` 标已读/未读 |
 | `POST` | `/api/mailboxes/:id/emails/mark-all-read` | Bearer | 全部标已读 |
@@ -46,11 +53,25 @@ npm run deploy         # 构建并部署 Worker + Pages
 | `PATCH` | `/api/mailboxes/:id/emails/:emailId` | Bearer | `{ isStarred?, folder?, labels? }` |
 | `GET` | `/api/mailboxes/:id/emails/:emailId/eml` | Bearer | 重建 `.eml` 下载 |
 | `GET` | `/api/mailboxes/:id/export` | Bearer | `?format=json\|mbox` |
-| `GET/POST/DELETE` | `/api/mailboxes/:id/filters` | Bearer | 入站过滤器 |
+| `GET/POST/DELETE` | `/api/mailboxes/:id/filters` | Bearer | 入站过滤器（自动删/星/归档/已读/标签） |
 | `GET` | `/api/admin/stats` | Admin | 需 `ADMIN_TOKEN` |
 | `GET/POST/DELETE` | `/api/admin/blocked-prefixes` | Admin | 封禁前缀 |
+| `GET` | `/api/admin/registrations` | Admin | 注册审计（含被拒记录，分页） |
+| `POST` | `/api/admin/mailboxes/:id/unbind` | Admin | 解绑设备指纹（换设备申诉后放行） |
 
 **已移除**：公开的 `GET /api/mailboxes`（不再公示全站地址列表）。
+
+### 反滥用规则（P4，一人一邮箱）
+
+创建邮箱时客户端携带 `device-id` header（localStorage `lm-device-id`），服务端判定：
+
+| 规则 | 条件 | 结果 |
+|------|------|------|
+| R1 | 同 `device-id` 已拥有邮箱 | `409 abuse.device_exists` |
+| R2 | 无指纹且同 IP ≥3 个邮箱 | `409 abuse.ip_limit` |
+| R3 | 同 IP ≥8 个邮箱 | `409 abuse.ip_limit` |
+
+每次尝试（成功/被拒）写入 `registrations` 审计表。已知边界：清 localStorage + 换 IP 可绕过指纹限制。
 
 ### 安全与约束（P0）
 
@@ -74,14 +95,24 @@ npm run deploy         # 构建并部署 Worker + Pages
 | `MAILBOX_CREATE_PER_IP_HOUR` | var | `3` | 每 IP 每小时创建上限 |
 | `LOGIN_PER_IP_WINDOW` | var | `30` | 每 IP 每 15 分钟登录上限 |
 | `LOGIN_PER_ADDR_WINDOW` | var | `10` | 每 IP+前缀每 15 分钟登录上限 |
+| `EMAIL_MAX_AGE_DAYS` | var | `0` | 超龄邮件自动清理（0 = 关闭） |
 | `TURNSTILE_SECRET` | secret | — | Turnstile 密钥 |
 | `INVITE_CODE` | secret | — | 可选邀请码 |
+| `ADMIN_TOKEN` | secret | — | 管理 API 鉴权 |
+| `MAIL_WEBHOOK_URL` | secret | — | 入站邮件到达通知 webhook |
 
 ## 收信链路
 
 MX 记录 → Cloudflare Email Routing（catch-all 规则投递到 `lemon-mail` Worker）→ Worker 校验（≤1MB、邮箱存在、配额充足）→ PostalMime 解析 → 存入 D1 `emails` 表，并原子增加 `used_bytes`。失败路径通过 `setReject` 退回发件人。
 
 Email Routing 规则、MX/DNS 记录在 Cloudflare Dashboard 配置，不归 wrangler.jsonc 管理。
+
+## 前端技术栈
+
+- **PWA**：`vite-plugin-pwa`（Workbox 预缓存 js/css/html/图标；字体与 Turnstile 运行时缓存）；图标由 `@vite-pwa/assets-generator` 生成（`npx pwa-assets-generator` 重新生成）
+- **深色模式**：语义色板（`src/style.css` token）+ 系统偏好默认 + 手动切换持久化
+- **多标签页同步**：`storage` 事件 + `lm-event` 广播（主题/语言/最近邮箱/收件箱变更/登出）
+- **i18n**：zh-CN / en-US 双语，所有文案在 `src/i18n/locales/`
 
 ## 待办
 

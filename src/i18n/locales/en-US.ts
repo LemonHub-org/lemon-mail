@@ -5,8 +5,11 @@ export default {
   },
   nav: {
     mainNav: 'Main navigation',
+    skip: 'Skip to content',
     login: 'Log in',
+    theme: 'Toggle theme',
     create: 'Create mailbox',
+    install: 'Install app',
   },
   hero: {
     badge: 'Your domain, your mailbox',
@@ -21,7 +24,7 @@ export default {
     password: 'Per-address password',
     hosting: 'Email hosting',
     recent: 'Recent on this device',
-    domain: '@lemonhub.net',
+    domain: "{'@'}lemonhub.net",
   },
   access: {
     badge: 'Get started',
@@ -60,6 +63,7 @@ export default {
     passwordLabel: 'Inbox password',
     passwordPlaceholder: 'At least 8 characters',
     passwordHint: 'It cannot be recovered once created — keep it safe. The prefix must be at least 3 characters; reserved RFC and well-known brand names are not allowed.',
+    onePerUser: 'One mailbox per person.',
     inviteLabel: 'Invite code',
     invitePlaceholder: 'An invite code is required',
     show: 'Show',
@@ -74,6 +78,8 @@ export default {
     created: '{address} created — entering inbox…',
   },
   how: {
+    sectionTitle: 'Three steps, each in its place',
+    sectionTagline: 'From naming to hosting to control — every address stays clear and independent.',
     naming: { kicker: 'Naming', title: 'Pick a name', body: 'Work, bills, communities — or any scenario you want to keep separate.' },
     hosting: { kicker: 'Hosting', title: 'Mail delivered directly', body: 'Mail lands straight in your inbox here — no third-party forwarding.' },
     privacy: { kicker: 'Privacy', title: 'Addresses stay private', body: 'Only those who know the prefix and password can open the mailbox.' },
@@ -199,6 +205,10 @@ export default {
     mailbox_exists: 'This mailbox address already exists.',
     mailbox_limit_reached: 'The mailbox limit has been reached — no more can be created right now.',
     invalid_invite: 'Invalid invite code.',
+    abuse: {
+      device_exists: 'One mailbox per person — this device already has one.',
+      ip_limit: 'Too many mailboxes created from this network. Please try again from a different network.',
+    },
     turnstile_failed: 'Human verification failed. Please try again.',
     rate_limited: 'Too many attempts. Please try again later.',
     forbidden: 'You are not allowed to do that.',

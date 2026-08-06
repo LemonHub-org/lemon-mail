@@ -2,8 +2,11 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch, watchEffect } from 'vue'
 import DOMPurify from 'dompurify'
 import { normalizeLocalPart } from '../shared/local-part'
-import { useAppI18n } from './i18n'
+import { useAppI18n, setLocale, type AppLocale } from './i18n'
+import { applyTheme, type Theme } from './theme'
+import { broadcastTabEvent, parseTabEvent, type TabEvent } from './tabs'
 import LocaleSwitcher from './components/LocaleSwitcher.vue'
+import ThemeSwitcher from './components/ThemeSwitcher.vue'
 import heroImage from './assets/mail-routes-hero.png'
 
 const { t, te, locale } = useAppI18n()
@@ -43,10 +46,16 @@ type FilterItem = {
 }
 type LandingTab = 'login' | 'create'
 
+interface BeforeInstallPromptEvent extends Event {
+  prompt: () => Promise<void>
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>
+}
+
 const domain = 'lemonhub.net'
 const apiBase = import.meta.env.VITE_API_BASE ?? ''
 const RECENT_KEY = 'lm-recent-mailboxes'
 const TOKEN_PREFIX = 'lm-token-'
+const DEVICE_KEY = 'lm-device-id'
 const PAGE_SIZE = 40
 const TURNSTILE_SITEKEY = '0x4AAAAAAEHG1eVxw5ySkmSQ'
 
@@ -60,6 +69,8 @@ let createWidgetRendered = false
 const view = ref<'landing' | 'inbox'>('landing')
 const landingTab = ref<LandingTab>('login')
 const recentMailboxes = ref<Mailbox[]>([])
+let installPrompt: BeforeInstallPromptEvent | null = null
+const installVisible = ref(false)
 
 const createLocalPart = ref('')
 const createPassword = ref('')
@@ -143,6 +154,19 @@ class ApiError extends Error {
   constructor(code: string | undefined) {
     super(code ?? 'unknown')
     this.code = code
+  }
+}
+
+function deviceId(): string {
+  try {
+    let id = localStorage.getItem(DEVICE_KEY)
+    if (!id) {
+      id = crypto.randomUUID()
+      localStorage.setItem(DEVICE_KEY, id)
+    }
+    return id
+  } catch {
+    return ''
   }
 }
 
@@ -338,7 +362,7 @@ async function createMailbox() {
     }
     const response = await fetch(`${apiBase}/api/mailboxes`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'device-id': deviceId() },
       body: JSON.stringify({
         localPart: createLocalPart.value,
         password: createPassword.value,
@@ -431,9 +455,9 @@ async function enterInbox() {
   await loadInbox(true)
 }
 
-async function loadInbox(reset = false) {
+async function loadInbox(reset = false, silent = false) {
   if (!mailbox.value) return
-  if (reset) {
+  if (reset && !silent) {
     inboxLoading.value = true
     emails.value = []
   }
@@ -587,6 +611,7 @@ async function patchEmail(
   if (vf === 'starred' && body.isStarred === false) {
     emails.value = emails.value.filter((e) => e.id !== emailId)
   }
+  if (mailbox.value) broadcastTabEvent({ type: 'inbox-changed', mailboxId: mailbox.value.id })
 }
 
 async function downloadEml(emailId: string) {
@@ -714,6 +739,7 @@ async function deleteEmail(emailId: string) {
     selectedId.value = null
     mobilePane.value = 'list'
   }
+  if (mailbox.value) broadcastTabEvent({ type: 'inbox-changed', mailboxId: mailbox.value.id })
 }
 async function deleteMailbox() {
   if (!mailbox.value) return
@@ -725,6 +751,7 @@ async function deleteMailbox() {
       headers: { authorization: `Bearer ${token.value}` },
     })
     if (!response.ok) throw new ApiError(await readErrorCode(response))
+    broadcastTabEvent({ type: 'mailbox-deleted', mailboxId: mailbox.value.id })
     removeRecent(mailbox.value.id)
     await logout(true)
   } catch (err) {
@@ -747,7 +774,10 @@ async function logout(toLanding = true) {
       /* still clear local session */
     }
   }
-  if (id) clearToken(id)
+  if (id) {
+    broadcastTabEvent({ type: 'logout', mailboxId: id })
+    clearToken(id)
+  }
   token.value = ''
   mailbox.value = null
   emails.value = []
@@ -855,105 +885,212 @@ onMounted(() => {
   loadRecent()
   loadHealth()
   window.addEventListener('keydown', onKeydown)
+  window.addEventListener('storage', onStorage)
+  window.addEventListener('beforeinstallprompt', onBeforeInstallPrompt)
+  window.addEventListener('appinstalled', onAppInstalled)
 })
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('storage', onStorage)
+  window.removeEventListener('beforeinstallprompt', onBeforeInstallPrompt)
+  window.removeEventListener('appinstalled', onAppInstalled)
 })
+
+let tabSyncTimer: ReturnType<typeof setTimeout> | null = null
+
+function onStorage(e: StorageEvent) {
+  if (!e.key || e.newValue === null) return
+  if (e.key === 'lm-theme' && (e.newValue === 'light' || e.newValue === 'dark')) {
+    applyTheme(e.newValue as Theme)
+  } else if (e.key === 'lm-locale' && (e.newValue === 'zh-CN' || e.newValue === 'en-US')) {
+    setLocale(e.newValue as AppLocale)
+  } else if (e.key === 'lm-recent-mailboxes') {
+    loadRecent()
+  } else if (e.key === 'lm-event') {
+    const ev = parseTabEvent(e.newValue)
+    if (ev) handleTabEvent(ev)
+  }
+}
+
+function handleTabEvent(ev: TabEvent) {
+  const currentId = mailbox.value?.id
+  if (!currentId || ev.mailboxId !== currentId) return
+  if (ev.type === 'logout' || ev.type === 'mailbox-deleted') {
+    void logout(true)
+  } else if (ev.type === 'inbox-changed' && view.value === 'inbox') {
+    if (tabSyncTimer) clearTimeout(tabSyncTimer)
+    tabSyncTimer = setTimeout(() => void syncInboxFromTab(), 400)
+  }
+}
+
+async function syncInboxFromTab() {
+  if (!mailbox.value) return
+  const keepId = selectedId.value
+  await loadInbox(true, true)
+  if (keepId && emails.value.some((e) => e.id === keepId)) {
+    if (selected.value) await openEmail(keepId, false)
+  } else {
+    selected.value = null
+    selectedId.value = null
+  }
+}
+
+function onBeforeInstallPrompt(e: Event) {
+  e.preventDefault()
+  installPrompt = e as BeforeInstallPromptEvent
+  installVisible.value = true
+}
+
+function onAppInstalled() {
+  installPrompt = null
+  installVisible.value = false
+}
+
+async function installApp() {
+  if (!installPrompt) return
+  await installPrompt.prompt()
+  installPrompt = null
+  installVisible.value = false
+}
 </script>
 
 <template>
+  <a
+    href="#top"
+    class="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[100] focus:rounded-full focus:bg-surface focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:shadow-lg"
+  >{{ t('nav.skip') }}</a>
+
   <!-- ── Landing ── -->
-  <div v-if="view === 'landing'" class="min-h-dvh bg-[#f7f8f6] text-[#18201d]">
-    <nav class="mx-auto flex h-[72px] max-w-7xl items-center justify-between px-5 md:px-8" :aria-label="t('nav.mainNav')">
+  <div v-if="view === 'landing'" class="min-h-dvh bg-canvas text-ink">
+    <nav
+      class="sticky top-0 z-40 mx-auto flex h-[calc(68px+env(safe-area-inset-top))] max-w-7xl items-center justify-between border-b border-line/60 bg-canvas/80 px-5 pt-[env(safe-area-inset-top)] backdrop-blur-md md:px-8"
+      :aria-label="t('nav.mainNav')"
+    >
       <a class="flex items-center gap-2.5 font-semibold tracking-tight" href="#top">
-        <span class="grid size-8 place-items-center rounded-[10px] bg-[#18201d] text-sm font-bold text-[#f7f8f6]">L</span>
+        <span class="grid size-8 place-items-center rounded-[10px] bg-ink text-sm font-bold text-canvas">L</span>
         <span>Lemon Mail</span>
       </a>
       <div class="flex items-center gap-2">
         <LocaleSwitcher />
+        <ThemeSwitcher />
+        <button
+          v-if="installVisible"
+          class="inline-flex items-center gap-1.5 rounded-full border border-line-2 px-3 py-1.5 text-xs font-medium text-ink-2 transition hover:border-line-3 hover:bg-surface active:scale-[.98] sm:px-4 sm:py-2 sm:text-sm"
+          type="button"
+          @click="installApp"
+        >
+          <svg class="size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M12 3v12M7 10l5 5 5-5M4 21h16" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          <span class="hidden sm:inline">{{ t('nav.install') }}</span>
+        </button>
         <a
-          class="hidden rounded-full px-4 py-2 text-sm font-medium text-[#33413b] transition hover:bg-white sm:inline-flex"
+          class="hidden rounded-full px-4 py-2 text-sm font-medium text-ink-2 transition hover:bg-surface sm:inline-flex"
           href="#access"
           @click="landingTab = 'login'"
         >{{ t('nav.login') }}</a>
         <a
-          class="rounded-full bg-[#18201d] px-4 py-2 text-sm font-medium text-[#f7f8f6] transition hover:bg-[#33413b] active:translate-y-px"
+          class="rounded-full bg-ink px-4 py-2 text-sm font-medium text-canvas transition hover:bg-ink-2 active:scale-[.98]"
           href="#access"
           @click="landingTab = 'create'"
         >{{ t('nav.create') }}</a>
       </div>
     </nav>
 
-    <section id="top" class="relative mx-auto grid min-h-[calc(100dvh-72px)] max-w-7xl items-center gap-10 px-5 pb-14 pt-10 md:px-8 lg:grid-cols-[0.92fr_1.08fr] lg:pb-20 lg:pt-16">
+    <section id="top" class="relative mx-auto grid min-h-[calc(100dvh-68px-env(safe-area-inset-top))] max-w-7xl items-center gap-10 px-5 pb-16 pt-12 md:px-8 lg:grid-cols-[0.94fr_1.06fr] lg:gap-12 lg:pb-24 lg:pt-20">
       <div class="relative z-10 max-w-xl">
-        <p class="mb-6 text-sm font-medium tracking-wide text-[#d85e32]">{{ t('hero.badge') }}</p>
-        <h1 class="text-5xl font-semibold tracking-[-0.06em] text-balance sm:text-6xl lg:text-7xl">{{ t('hero.heading') }}</h1>
-        <p class="mt-6 max-w-md text-lg leading-8 text-[#59645f]">
+        <p class="lm-rise mb-6 flex items-center gap-2 text-sm font-medium tracking-wide text-accent-strong">
+          <span class="size-1.5 rounded-full bg-accent" aria-hidden="true"></span>
+          {{ t('hero.badge') }}
+        </p>
+        <h1 class="lm-rise text-4xl font-semibold leading-[1.06] tracking-[-0.05em] text-balance sm:text-6xl sm:leading-[1.04] lg:text-7xl" style="animation-delay: 70ms">{{ t('hero.heading') }}</h1>
+        <p class="lm-rise mt-6 max-w-md text-base leading-7 text-ink-3 sm:mt-7 sm:text-lg sm:leading-8" style="animation-delay: 140ms">
           {{ t('hero.tagline') }}
         </p>
-        <div class="mt-8 flex flex-wrap gap-3">
+        <div class="lm-rise mt-8 flex flex-wrap items-center gap-3 sm:mt-9" style="animation-delay: 210ms">
           <a
-            class="rounded-full bg-[#e66d40] px-5 py-3 font-medium text-white shadow-[0_12px_30px_rgba(230,109,64,0.18)] transition hover:bg-[#ca5730] active:translate-y-px"
+            class="group inline-flex w-full items-center justify-center gap-2 rounded-full bg-accent px-6 py-3 font-medium text-accent-ink shadow-[0_12px_30px_rgba(230,109,64,0.18)] transition hover:bg-accent-hover active:scale-[.98] sm:w-auto"
             href="#access"
             @click="landingTab = 'create'"
-          >{{ t('hero.create') }}</a>
+          >
+            {{ t('hero.create') }}
+            <svg class="size-4 transition-transform group-hover:translate-x-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M5 12h14M13 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </a>
           <a
-            class="rounded-full border border-[#cfd5d1] px-5 py-3 font-medium text-[#33413b] transition hover:border-[#9ca9a2] hover:bg-white active:translate-y-px"
+            class="inline-flex w-full items-center justify-center rounded-full border border-line-2 px-6 py-3 font-medium text-ink-2 transition hover:border-line-3 hover:bg-surface active:scale-[.98] sm:w-auto"
             href="#access"
             @click="landingTab = 'login'"
           >{{ t('hero.login') }}</a>
         </div>
       </div>
-      <div class="relative mx-auto w-full max-w-[620px] lg:mr-0">
-        <div class="absolute -inset-10 -z-10 rounded-full bg-[#e8efe8] blur-3xl"></div>
-        <img
-          class="aspect-[4/5] w-full rounded-[24px] object-cover shadow-[0_30px_80px_rgba(41,65,53,0.12)]"
-          :src="heroImage"
-          :alt="t('hero.alt')"
-        />
-      </div>
-    </section>
-
-    <section class="border-y border-[#dce2de] bg-[#f1f4f1] py-8">
-      <div class="mx-auto flex max-w-7xl flex-col gap-4 px-5 md:flex-row md:items-center md:justify-between md:px-8">
-        <p class="text-sm font-medium text-[#59645f]">{{ t('trustBar.text') }}</p>
-        <div class="flex flex-wrap gap-x-8 gap-y-2 text-sm text-[#33413b]">
-          <span>{{ t('trustBar.password') }}</span>
-          <span>{{ t('trustBar.hosting') }}</span>
-          <span>{{ t('trustBar.recent') }}</span>
-          <span>{{ t('trustBar.domain') }}</span>
+      <div class="lm-rise relative mx-auto w-full max-w-[620px] lg:mr-0" style="animation-delay: 280ms">
+        <div class="absolute -inset-12 -z-10 rounded-full bg-hero-glow blur-3xl"></div>
+        <div class="overflow-hidden rounded-[24px] ring-1 ring-line shadow-[0_30px_80px_rgba(41,65,53,0.12)] sm:rounded-[28px]">
+          <img
+            class="aspect-[4/3] w-full object-cover transition-transform duration-700 ease-out hover:scale-[1.02] sm:aspect-[4/5]"
+            :src="heroImage"
+            :alt="t('hero.alt')"
+          />
+        </div>
+        <div
+          class="absolute bottom-4 left-4 flex items-center gap-2.5 rounded-full border border-canvas/40 bg-surface/80 py-2 pl-3 pr-4 shadow-[0_12px_32px_rgba(41,65,53,0.14)] backdrop-blur-md sm:bottom-5 sm:left-5"
+        >
+          <span class="grid size-7 place-items-center rounded-full bg-accent/15 text-accent" aria-hidden="true">
+            <svg class="size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M4 6h16v12H4z" stroke-linejoin="round" />
+              <path d="m4 8 8 6 8-6" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </span>
+          <span class="text-sm font-medium tabular-nums">{{ t('trustBar.domain') }}</span>
         </div>
       </div>
     </section>
 
-    <section id="access" class="mx-auto max-w-7xl px-5 py-20 md:px-8 lg:py-28">
+    <section class="border-y border-line bg-surface-3 py-7">
+      <div class="mx-auto flex max-w-7xl flex-col gap-4 px-5 md:flex-row md:items-center md:justify-between md:px-8">
+        <p class="text-sm font-medium text-ink-3">{{ t('trustBar.text') }}</p>
+        <div class="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-ink-2">
+          <span class="flex items-center gap-6"><span class="size-1 rounded-full bg-accent/70" aria-hidden="true"></span>{{ t('trustBar.password') }}</span>
+          <span class="flex items-center gap-6"><span class="size-1 rounded-full bg-accent/70" aria-hidden="true"></span>{{ t('trustBar.hosting') }}</span>
+          <span class="flex items-center gap-6"><span class="size-1 rounded-full bg-accent/70" aria-hidden="true"></span>{{ t('trustBar.recent') }}</span>
+          <span class="flex items-center gap-6"><span class="size-1 rounded-full bg-accent/70" aria-hidden="true"></span>{{ t('trustBar.domain') }}</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="access" class="mx-auto max-w-7xl scroll-mt-20 px-5 py-20 md:px-8 lg:py-28">
       <div class="grid gap-12 lg:grid-cols-[0.85fr_1.15fr] lg:items-start">
         <div>
-          <p class="mb-4 text-sm font-medium tracking-wide text-[#d85e32]">{{ t('access.badge') }}</p>
-          <h2 class="text-4xl font-semibold tracking-[-0.05em] sm:text-5xl">{{ t('access.heading1') }}<br />{{ t('access.heading2') }}</h2>
-          <p class="mt-5 max-w-sm leading-7 text-[#59645f]">
+          <p class="mb-4 flex items-center gap-2 text-sm font-medium tracking-wide text-accent-strong">
+            <span class="size-1.5 rounded-full bg-accent" aria-hidden="true"></span>
+            {{ t('access.badge') }}
+          </p>
+          <h2 class="text-4xl font-semibold leading-[1.1] tracking-[-0.045em] text-balance sm:text-5xl">{{ t('access.heading1') }}<br />{{ t('access.heading2') }}</h2>
+          <p class="mt-5 max-w-sm leading-7 text-ink-3">
             {{ t('access.description') }}
           </p>
 
           <div v-if="recentMailboxes.length" class="mt-10">
             <div class="mb-3 flex items-center justify-between">
-              <h3 class="text-sm font-medium text-[#59645f]">{{ t('recent.heading') }}</h3>
-              <span class="text-xs text-[#9ca9a2]">{{ t('recent.note') }}</span>
+              <h3 class="text-sm font-medium text-ink-3">{{ t('recent.heading') }}</h3>
+              <span class="text-xs text-ink-5">{{ t('recent.note') }}</span>
             </div>
             <ul class="grid gap-2">
               <li v-for="item in recentMailboxes" :key="item.id">
-                <div class="flex items-center gap-2 rounded-[14px] border border-[#dce2de] bg-white p-2 pl-4 transition hover:border-[#c0c9c3]">
+                <div class="flex items-center gap-2 rounded-[14px] border border-line bg-surface p-2 pl-4 transition hover:border-line-3">
                   <button
                     class="min-w-0 flex-1 text-left"
                     type="button"
                     @click="pickRecent(item)"
                   >
                     <p class="truncate font-medium">{{ item.localPart }}@{{ domain }}</p>
-                    <p class="mt-0.5 text-xs text-[#69746e]">{{ t('recent.clickToFill') }}</p>
+                    <p class="mt-0.5 text-xs text-ink-4">{{ t('recent.clickToFill') }}</p>
                   </button>
                   <button
-                    class="shrink-0 rounded-full px-3 py-1.5 text-xs text-[#9b3718] transition hover:bg-[#fff0ea]"
+                    class="shrink-0 rounded-full px-3 py-1.5 text-xs text-danger transition hover:bg-error-bg"
                     type="button"
                     :title="t('recent.removeTitle')"
                     @click="removeRecent(item.id)"
@@ -964,11 +1101,11 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div class="rounded-[20px] border border-[#dce2de] bg-white p-5 shadow-[0_20px_50px_rgba(41,65,53,0.06)] sm:p-7">
-          <div class="mb-6 grid grid-cols-2 gap-1 rounded-[12px] bg-[#eef2ef] p-1" role="tablist">
+        <div class="rounded-[20px] border border-line bg-surface p-5 shadow-[0_20px_50px_rgba(41,65,53,0.06)] sm:p-7">
+          <div class="mb-6 grid grid-cols-2 gap-1 rounded-[12px] bg-surface-3 p-1" role="tablist">
             <button
               class="rounded-[10px] px-3 py-2.5 text-sm font-medium transition"
-              :class="landingTab === 'login' ? 'bg-white text-[#18201d] shadow-sm' : 'text-[#59645f] hover:text-[#18201d]'"
+              :class="landingTab === 'login' ? 'bg-surface text-ink shadow-sm' : 'text-ink-3 hover:text-ink'"
               type="button"
               role="tab"
               :aria-selected="landingTab === 'login'"
@@ -976,7 +1113,7 @@ onUnmounted(() => {
             >{{ t('tabs.login') }}</button>
             <button
               class="rounded-[10px] px-3 py-2.5 text-sm font-medium transition"
-              :class="landingTab === 'create' ? 'bg-white text-[#18201d] shadow-sm' : 'text-[#59645f] hover:text-[#18201d]'"
+              :class="landingTab === 'create' ? 'bg-surface text-ink shadow-sm' : 'text-ink-3 hover:text-ink'"
               type="button"
               role="tab"
               :aria-selected="landingTab === 'create'"
@@ -987,7 +1124,7 @@ onUnmounted(() => {
           <form v-if="landingTab === 'login'" class="grid gap-5" @submit.prevent="doLogin">
             <div>
               <label class="mb-2 block text-sm font-medium" for="login-local">{{ t('loginForm.emailLabel') }}</label>
-              <div class="flex overflow-hidden rounded-[12px] border border-[#cfd5d1] bg-[#fafbfa] focus-within:border-[#e66d40] focus-within:ring-2 focus-within:ring-[#e66d40]/20">
+              <div class="flex overflow-hidden rounded-[12px] border border-line-2 bg-surface-2 focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/20">
                 <input
                   id="login-local"
                   v-model="loginLocalPart"
@@ -996,7 +1133,7 @@ onUnmounted(() => {
                   autocomplete="username"
                   spellcheck="false"
                 />
-                <span class="flex items-center border-l border-[#dce2de] px-3 text-sm text-[#59645f]">@{{ domain }}</span>
+                <span class="flex items-center border-l border-line px-3 text-sm text-ink-3">@{{ domain }}</span>
               </div>
             </div>
             <div>
@@ -1005,26 +1142,26 @@ onUnmounted(() => {
                 <input
                   id="login-password"
                   v-model="loginPassword"
-                  class="w-full rounded-[12px] border border-[#cfd5d1] bg-[#fafbfa] px-4 py-3 pr-16 outline-none transition focus:border-[#e66d40] focus:ring-2 focus:ring-[#e66d40]/20"
+                  class="w-full rounded-[12px] border border-line-2 bg-surface-2 px-4 py-3 pr-16 text-base outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20 sm:text-sm"
                   :type="showLoginPassword ? 'text' : 'password'"
                   :placeholder="t('loginForm.passwordPlaceholder')"
                   autocomplete="current-password"
                 />
                 <button
-                  class="absolute inset-y-0 right-2 my-auto h-8 rounded-full px-2.5 text-xs font-medium text-[#59645f] hover:text-[#18201d]"
+                  class="absolute inset-y-0 right-2 my-auto h-8 rounded-full px-2.5 text-xs font-medium text-ink-3 hover:text-ink"
                   type="button"
                   @click="showLoginPassword = !showLoginPassword"
                 >{{ showLoginPassword ? t('loginForm.hide') : t('loginForm.show') }}</button>
               </div>
             </div>
-            <p v-if="loginError" class="rounded-[12px] bg-[#fff0ea] px-4 py-3 text-sm text-[#9b3718]" role="alert">{{ loginError }}</p>
+            <p v-if="loginError" class="rounded-[12px] bg-error-bg px-4 py-3 text-sm text-danger" role="alert">{{ loginError }}</p>
             <div
               class="cf-turnstile"
               data-action="turnstile-spin-v2"
               ref="loginWidgetEl"
             ></div>
             <button
-              class="w-full rounded-full bg-[#18201d] px-5 py-3 font-medium text-[#f7f8f6] transition hover:bg-[#33413b] disabled:cursor-not-allowed disabled:opacity-60 active:translate-y-px"
+              class="w-full rounded-full bg-ink px-5 py-3 font-medium text-canvas transition hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-60 active:translate-y-px"
               type="submit"
               :disabled="loggingIn"
             >{{ loggingIn ? t('loginForm.submitting') : t('loginForm.submit') }}</button>
@@ -1033,7 +1170,7 @@ onUnmounted(() => {
           <form v-else class="grid gap-5" @submit.prevent="createMailbox">
             <div>
               <label class="mb-2 block text-sm font-medium" for="create-local">{{ t('createForm.localLabel') }}</label>
-              <div class="flex overflow-hidden rounded-[12px] border border-[#cfd5d1] bg-[#fafbfa] focus-within:border-[#e66d40] focus-within:ring-2 focus-within:ring-[#e66d40]/20">
+              <div class="flex overflow-hidden rounded-[12px] border border-line-2 bg-surface-2 focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/20">
                 <input
                   id="create-local"
                   v-model="createLocalPart"
@@ -1042,9 +1179,9 @@ onUnmounted(() => {
                   autocomplete="off"
                   spellcheck="false"
                 />
-                <span class="flex items-center border-l border-[#dce2de] px-3 text-sm text-[#59645f]">@{{ domain }}</span>
+                <span class="flex items-center border-l border-line px-3 text-sm text-ink-3">@{{ domain }}</span>
               </div>
-              <p class="mt-2 text-sm text-[#69746e]">{{ t('createForm.localHint', { address: addressPreview }) }}</p>
+              <p class="mt-2 text-sm text-ink-4">{{ t('createForm.localHint', { address: addressPreview }) }}</p>
             </div>
             <div>
               <label class="mb-2 block text-sm font-medium" for="create-password">{{ t('createForm.passwordLabel') }}</label>
@@ -1052,40 +1189,47 @@ onUnmounted(() => {
                 <input
                   id="create-password"
                   v-model="createPassword"
-                  class="w-full rounded-[12px] border border-[#cfd5d1] bg-[#fafbfa] px-4 py-3 pr-16 outline-none transition focus:border-[#e66d40] focus:ring-2 focus:ring-[#e66d40]/20"
+                  class="w-full rounded-[12px] border border-line-2 bg-surface-2 px-4 py-3 pr-16 text-base outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20 sm:text-sm"
                   :type="showCreatePassword ? 'text' : 'password'"
                   :placeholder="t('createForm.passwordPlaceholder')"
                   autocomplete="new-password"
                 />
                 <button
-                  class="absolute inset-y-0 right-2 my-auto h-8 rounded-full px-2.5 text-xs font-medium text-[#59645f] hover:text-[#18201d]"
+                  class="absolute inset-y-0 right-2 my-auto h-8 rounded-full px-2.5 text-xs font-medium text-ink-3 hover:text-ink"
                   type="button"
                   @click="showCreatePassword = !showCreatePassword"
                 >{{ showCreatePassword ? t('createForm.hide') : t('createForm.show') }}</button>
               </div>
-              <p class="mt-2 text-sm text-[#69746e]">{{ t('createForm.passwordHint') }}</p>
+              <p class="mt-2 text-sm text-ink-4">{{ t('createForm.passwordHint') }}</p>
+              <p class="mt-3 flex items-center gap-1.5 rounded-[10px] bg-surface-3 px-3 py-2 text-xs text-ink-3">
+                <svg class="size-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <circle cx="12" cy="12" r="9" />
+                  <path d="M12 8v4M12 16h.01" stroke-linecap="round" />
+                </svg>
+                {{ t('createForm.onePerUser') }}
+              </p>
             </div>
             <div v-if="inviteRequired">
               <label class="mb-2 block text-sm font-medium" for="create-invite">{{ t('createForm.inviteLabel') }}</label>
               <input
                 id="create-invite"
                 v-model="createInviteCode"
-                class="w-full rounded-[12px] border border-[#cfd5d1] bg-[#fafbfa] px-4 py-3 outline-none transition focus:border-[#e66d40] focus:ring-2 focus:ring-[#e66d40]/20"
+                class="w-full rounded-[12px] border border-line-2 bg-surface-2 px-4 py-3 text-base outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20 sm:text-sm"
                 type="text"
                 :placeholder="t('createForm.invitePlaceholder')"
                 autocomplete="off"
                 spellcheck="false"
               />
             </div>
-            <p v-if="createError" class="rounded-[12px] bg-[#fff0ea] px-4 py-3 text-sm text-[#9b3718]" role="alert">{{ createError }}</p>
-            <p v-if="createFlash" class="rounded-[12px] bg-[#edf6ef] px-4 py-3 text-sm text-[#2e6c43]" role="status">{{ createFlash }}</p>
+            <p v-if="createError" class="rounded-[12px] bg-error-bg px-4 py-3 text-sm text-danger" role="alert">{{ createError }}</p>
+            <p v-if="createFlash" class="rounded-[12px] bg-success-bg px-4 py-3 text-sm text-success" role="status">{{ createFlash }}</p>
             <div
               class="cf-turnstile"
               data-action="turnstile-spin-v2"
               ref="createWidgetEl"
             ></div>
             <button
-              class="w-full rounded-full bg-[#18201d] px-5 py-3 font-medium text-[#f7f8f6] transition hover:bg-[#33413b] disabled:cursor-not-allowed disabled:opacity-60 active:translate-y-px"
+              class="w-full rounded-full bg-ink px-5 py-3 font-medium text-canvas transition hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-60 active:translate-y-px"
               type="submit"
               :disabled="creating"
             >{{ creating ? t('createForm.submitting') : t('createForm.submit') }}</button>
@@ -1094,39 +1238,59 @@ onUnmounted(() => {
       </div>
     </section>
 
-    <section id="how" class="mx-auto max-w-7xl px-5 pb-24 md:px-8 lg:pb-32">
-      <div class="grid gap-4 md:grid-cols-[1.4fr_0.9fr_1.1fr]">
-        <article class="min-h-64 rounded-[20px] bg-[#dfe9e1] p-7">
-          <p class="text-sm font-medium text-[#d85e32]">{{ t('how.naming.kicker') }}</p>
-          <h3 class="mt-12 text-3xl font-semibold tracking-tight">{{ t('how.naming.title') }}</h3>
-          <p class="mt-3 max-w-xs leading-7 text-[#59645f]">{{ t('how.naming.body') }}</p>
-        </article>
-        <article class="min-h-64 rounded-[20px] bg-[#f4ddd3] p-7">
-          <p class="text-sm font-medium text-[#d85e32]">{{ t('how.hosting.kicker') }}</p>
-          <h3 class="mt-12 text-3xl font-semibold tracking-tight">{{ t('how.hosting.title') }}</h3>
-          <p class="mt-3 max-w-xs leading-7 text-[#59645f]">{{ t('how.hosting.body') }}</p>
-        </article>
-        <article class="min-h-64 rounded-[20px] bg-[#e8ece9] p-7">
-          <p class="text-sm font-medium text-[#d85e32]">{{ t('how.privacy.kicker') }}</p>
-          <h3 class="mt-12 text-3xl font-semibold tracking-tight">{{ t('how.privacy.title') }}</h3>
-          <p class="mt-3 max-w-xs leading-7 text-[#59645f]">{{ t('how.privacy.body') }}</p>
-        </article>
+    <section id="how" class="mx-auto max-w-7xl scroll-mt-20 px-5 py-24 md:px-8 lg:py-32">
+      <div class="grid gap-14 lg:grid-cols-[1fr_1.15fr] lg:gap-24">
+        <div class="lg:sticky lg:top-28 lg:self-start">
+          <p class="mb-4 flex items-center gap-2 text-sm font-medium tracking-wide text-accent-strong">
+            <span class="size-1.5 rounded-full bg-accent" aria-hidden="true"></span>
+            {{ t('how.naming.kicker') }}
+          </p>
+          <h2 class="max-w-md text-4xl font-semibold leading-[1.1] tracking-[-0.045em] text-balance sm:text-5xl">{{ t('how.sectionTitle') }}</h2>
+          <p class="mt-5 max-w-sm leading-7 text-ink-3">{{ t('how.sectionTagline') }}</p>
+        </div>
+
+        <ol class="divide-y divide-line">
+          <li class="group flex gap-6 py-8 first:pt-0 last:pb-0 lg:gap-8">
+            <span class="pt-1 text-3xl font-semibold tabular-nums tracking-tight text-ink-5 transition-colors group-hover:text-accent-strong lg:text-4xl">01</span>
+            <div class="min-w-0">
+              <p class="text-sm font-medium text-accent-strong">{{ t('how.naming.kicker') }}</p>
+              <h3 class="mt-2 text-2xl font-semibold tracking-tight">{{ t('how.naming.title') }}</h3>
+              <p class="mt-3 max-w-md leading-7 text-ink-3">{{ t('how.naming.body') }}</p>
+            </div>
+          </li>
+          <li class="group flex gap-6 py-8 first:pt-0 last:pb-0 lg:gap-8">
+            <span class="pt-1 text-3xl font-semibold tabular-nums tracking-tight text-ink-5 transition-colors group-hover:text-accent-strong lg:text-4xl">02</span>
+            <div class="min-w-0">
+              <p class="text-sm font-medium text-accent-strong">{{ t('how.hosting.kicker') }}</p>
+              <h3 class="mt-2 text-2xl font-semibold tracking-tight">{{ t('how.hosting.title') }}</h3>
+              <p class="mt-3 max-w-md leading-7 text-ink-3">{{ t('how.hosting.body') }}</p>
+            </div>
+          </li>
+          <li class="group flex gap-6 py-8 first:pt-0 last:pb-0 lg:gap-8">
+            <span class="pt-1 text-3xl font-semibold tabular-nums tracking-tight text-ink-5 transition-colors group-hover:text-accent-strong lg:text-4xl">03</span>
+            <div class="min-w-0">
+              <p class="text-sm font-medium text-accent-strong">{{ t('how.privacy.kicker') }}</p>
+              <h3 class="mt-2 text-2xl font-semibold tracking-tight">{{ t('how.privacy.title') }}</h3>
+              <p class="mt-3 max-w-md leading-7 text-ink-3">{{ t('how.privacy.body') }}</p>
+            </div>
+          </li>
+        </ol>
       </div>
     </section>
 
-    <footer class="border-t border-[#dce2de] px-5 py-8 md:px-8">
-      <div class="mx-auto flex max-w-7xl flex-col gap-3 text-sm text-[#69746e] sm:flex-row sm:items-center sm:justify-between">
+    <footer class="border-t border-line px-5 py-8 pb-[max(2rem,env(safe-area-inset-bottom))] md:px-8">
+      <div class="mx-auto flex max-w-7xl flex-col gap-3 text-sm text-ink-4 sm:flex-row sm:items-center sm:justify-between">
         <span>{{ t('footer.copyright') }}</span>
-        <span>{{ t('footer.service') }}</span>
+        <span class="tabular-nums">{{ t('footer.service') }}</span>
       </div>
     </footer>
   </div>
 
   <!-- ── Mail client ── -->
-  <div v-else class="flex h-dvh flex-col overflow-hidden bg-[#eef1ee] text-[#18201d]">
-    <header class="z-30 flex h-14 shrink-0 items-center gap-3 border-b border-[#dce2de] bg-[#f7f8f6]/95 px-3 backdrop-blur md:px-4">
+  <div v-else class="flex h-dvh flex-col overflow-hidden bg-canvas text-ink">
+    <header class="z-30 flex h-[calc(3.5rem+env(safe-area-inset-top))] shrink-0 items-center gap-3 border-b border-line bg-canvas/95 px-3 pt-[env(safe-area-inset-top)] backdrop-blur md:px-4">
       <button
-        class="grid size-9 place-items-center rounded-[10px] text-[#33413b] transition hover:bg-[#e4e9e5] md:hidden"
+        class="grid size-9 place-items-center rounded-[10px] text-ink-2 transition hover:bg-chip md:hidden"
         type="button"
         :aria-label="t('inbox.openMenu')"
         @click="sidebarOpen = true"
@@ -1137,23 +1301,23 @@ onUnmounted(() => {
       </button>
 
       <div class="flex min-w-0 items-center gap-2.5">
-        <span class="grid size-8 shrink-0 place-items-center rounded-[10px] bg-[#18201d] text-sm font-bold text-[#f7f8f6]">L</span>
+        <span class="grid size-8 shrink-0 place-items-center rounded-[10px] bg-ink text-sm font-bold text-canvas">L</span>
         <div class="min-w-0">
           <p class="truncate text-sm font-semibold tracking-tight">Lemon Mail</p>
-          <p class="truncate text-xs text-[#69746e]">{{ fullAddress }}</p>
+          <p class="truncate text-xs text-ink-4">{{ fullAddress }}</p>
         </div>
       </div>
 
-      <div class="ml-auto flex items-center gap-2">
+      <div class="ml-auto flex items-center gap-1.5 sm:gap-2">
         <button
-          class="hidden items-center gap-1.5 rounded-full border border-[#cfd5d1] px-3 py-1.5 text-xs font-medium text-[#33413b] transition hover:border-[#9ca9a2] hover:bg-white sm:inline-flex active:translate-y-px"
+          class="hidden items-center gap-1.5 rounded-full border border-line-2 px-3 py-1.5 text-xs font-medium text-ink-2 transition hover:border-line-3 hover:bg-surface sm:inline-flex active:translate-y-px"
           type="button"
           @click="copyAddress"
         >
           <span>{{ copyHint || t('inbox.copyAddress') }}</span>
         </button>
         <button
-          class="inline-flex items-center gap-1.5 rounded-full border border-[#cfd5d1] px-3 py-1.5 text-xs font-medium text-[#33413b] transition hover:border-[#9ca9a2] hover:bg-white disabled:opacity-50 active:translate-y-px"
+          class="inline-flex items-center gap-1.5 rounded-full border border-line-2 px-2.5 py-1.5 text-xs font-medium text-ink-2 transition hover:border-line-3 hover:bg-surface disabled:opacity-50 active:translate-y-px sm:px-3"
           type="button"
           :disabled="refreshing"
           @click="refreshInbox"
@@ -1175,44 +1339,50 @@ onUnmounted(() => {
           <span class="hidden sm:inline">{{ refreshing ? t('inbox.refreshing') : t('inbox.refresh') }}</span>
         </button>
         <button
-          class="rounded-full px-3 py-1.5 text-xs font-medium text-[#59645f] transition hover:bg-[#e4e9e5] hover:text-[#18201d] active:translate-y-px"
+          class="rounded-full px-3 py-1.5 text-xs font-medium text-ink-3 transition hover:bg-chip hover:text-ink active:translate-y-px"
           type="button"
           @click="settingsOpen = true"
         >{{ t('inbox.settings') }}</button>
-        <LocaleSwitcher />
-        <button
-          class="rounded-full px-3 py-1.5 text-xs font-medium text-[#59645f] transition hover:bg-[#e4e9e5] hover:text-[#18201d] active:translate-y-px"
-          type="button"
-          @click="logout(true)"
-        >{{ t('inbox.logout') }}</button>
+        <div class="hidden items-center gap-2 md:flex">
+          <LocaleSwitcher />
+          <ThemeSwitcher />
+          <button
+            class="rounded-full px-3 py-1.5 text-xs font-medium text-ink-3 transition hover:bg-chip hover:text-ink active:translate-y-px"
+            type="button"
+            @click="logout(true)"
+          >{{ t('inbox.logout') }}</button>
+        </div>
       </div>
     </header>
 
     <div class="relative flex min-h-0 flex-1">
       <!-- Mobile sidebar backdrop -->
-      <div
-        v-if="sidebarOpen"
-        class="absolute inset-0 z-40 bg-[#18201d]/30 md:hidden"
-        @click="sidebarOpen = false"
-      ></div>
+      <Transition name="lm-fade">
+        <div
+          v-if="sidebarOpen"
+          class="absolute inset-0 z-40 bg-ink/30 md:hidden"
+          @click="sidebarOpen = false"
+        ></div>
+      </Transition>
 
       <!-- Sidebar -->
       <aside
-        class="absolute inset-y-0 left-0 z-50 flex w-[260px] shrink-0 flex-col border-r border-[#dce2de] bg-[#f7f8f6] transition-transform md:static md:z-0 md:translate-x-0"
+        class="absolute inset-y-0 left-0 z-50 flex w-[260px] shrink-0 flex-col border-r border-line bg-canvas transition-transform md:static md:z-0 md:translate-x-0"
         :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'"
       >
-        <div class="flex items-center justify-between border-b border-[#dce2de] px-4 py-3 md:hidden">
+        <div class="flex items-center justify-between border-b border-line px-4 py-3 md:hidden">
           <span class="text-sm font-semibold">{{ t('inbox.folders') }}</span>
-          <button class="rounded-full px-2 py-1 text-sm text-[#59645f]" type="button" @click="sidebarOpen = false">{{ t('inbox.close') }}</button>
+          <button class="rounded-full px-2 py-1 text-sm text-ink-3" type="button" @click="sidebarOpen = false">{{ t('inbox.close') }}</button>
         </div>
 
         <nav class="flex flex-col gap-1 p-3" :aria-label="t('inbox.folderNav')">
           <button
-            class="flex items-center justify-between rounded-[12px] px-3 py-2.5 text-left text-sm font-medium transition"
-            :class="folder === 'inbox' ? 'bg-[#18201d] text-[#f7f8f6]' : 'text-[#33413b] hover:bg-[#e4e9e5]'"
+            class="relative flex items-center justify-between rounded-[12px] px-3 py-2.5 pl-3.5 text-left text-sm font-medium transition"
+            :class="folder === 'inbox' ? 'bg-surface-3 text-ink' : 'text-ink-2 hover:bg-chip'"
             type="button"
             @click="switchFolder('inbox')"
           >
+            <span v-if="folder === 'inbox'" class="absolute left-1 top-1/2 h-5 w-1 -translate-y-1/2 rounded-full bg-accent" aria-hidden="true"></span>
             <span class="flex items-center gap-2.5">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <path d="M4 6h16v12H4z" stroke-linejoin="round" />
@@ -1222,15 +1392,16 @@ onUnmounted(() => {
             </span>
             <span
               class="rounded-full px-2 py-0.5 text-xs tabular-nums"
-              :class="folder === 'inbox' ? 'bg-white/15 text-[#f7f8f6]' : 'bg-[#e4e9e5] text-[#59645f]'"
+              :class="folder === 'inbox' ? 'bg-ink text-canvas' : 'bg-chip text-ink-3'"
             >{{ folderCounts.inbox ?? 0 }}</span>
           </button>
           <button
-            class="flex items-center justify-between rounded-[12px] px-3 py-2.5 text-left text-sm font-medium transition"
-            :class="folder === 'unread' ? 'bg-[#18201d] text-[#f7f8f6]' : 'text-[#33413b] hover:bg-[#e4e9e5]'"
+            class="relative flex items-center justify-between rounded-[12px] px-3 py-2.5 pl-3.5 text-left text-sm font-medium transition"
+            :class="folder === 'unread' ? 'bg-surface-3 text-ink' : 'text-ink-2 hover:bg-chip'"
             type="button"
             @click="switchFolder('unread')"
           >
+            <span v-if="folder === 'unread'" class="absolute left-1 top-1/2 h-5 w-1 -translate-y-1/2 rounded-full bg-accent" aria-hidden="true"></span>
             <span class="flex items-center gap-2.5">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <circle cx="12" cy="12" r="8" />
@@ -1240,79 +1411,96 @@ onUnmounted(() => {
             </span>
             <span
               class="rounded-full px-2 py-0.5 text-xs tabular-nums"
-              :class="folder === 'unread' ? 'bg-white/15 text-[#f7f8f6]' : unread > 0 ? 'bg-[#fff0ea] text-[#d85e32]' : 'bg-[#e4e9e5] text-[#59645f]'"
+              :class="folder === 'unread' ? 'bg-ink text-canvas' : unread > 0 ? 'bg-error-bg text-accent-strong' : 'bg-chip text-ink-3'"
             >{{ unread }}</span>
           </button>
           <button
-            class="flex items-center justify-between rounded-[12px] px-3 py-2.5 text-left text-sm font-medium transition"
-            :class="folder === 'starred' ? 'bg-[#18201d] text-[#f7f8f6]' : 'text-[#33413b] hover:bg-[#e4e9e5]'"
+            class="relative flex items-center justify-between rounded-[12px] px-3 py-2.5 pl-3.5 text-left text-sm font-medium transition"
+            :class="folder === 'starred' ? 'bg-surface-3 text-ink' : 'text-ink-2 hover:bg-chip'"
             type="button"
             @click="switchFolder('starred')"
           >
+            <span v-if="folder === 'starred'" class="absolute left-1 top-1/2 h-5 w-1 -translate-y-1/2 rounded-full bg-accent" aria-hidden="true"></span>
             <span>{{ t('inbox.starred') }}</span>
-            <span class="rounded-full px-2 py-0.5 text-xs tabular-nums" :class="folder === 'starred' ? 'bg-white/15' : 'bg-[#e4e9e5] text-[#59645f]'">{{ starredCount }}</span>
+            <span class="rounded-full px-2 py-0.5 text-xs tabular-nums" :class="folder === 'starred' ? 'bg-ink text-canvas' : 'bg-chip text-ink-3'">{{ starredCount }}</span>
           </button>
           <button
-            class="flex items-center justify-between rounded-[12px] px-3 py-2.5 text-left text-sm font-medium transition"
-            :class="folder === 'archive' ? 'bg-[#18201d] text-[#f7f8f6]' : 'text-[#33413b] hover:bg-[#e4e9e5]'"
+            class="relative flex items-center justify-between rounded-[12px] px-3 py-2.5 pl-3.5 text-left text-sm font-medium transition"
+            :class="folder === 'archive' ? 'bg-surface-3 text-ink' : 'text-ink-2 hover:bg-chip'"
             type="button"
             @click="switchFolder('archive')"
           >
+            <span v-if="folder === 'archive'" class="absolute left-1 top-1/2 h-5 w-1 -translate-y-1/2 rounded-full bg-accent" aria-hidden="true"></span>
             <span>{{ t('inbox.archive') }}</span>
-            <span class="rounded-full px-2 py-0.5 text-xs tabular-nums" :class="folder === 'archive' ? 'bg-white/15' : 'bg-[#e4e9e5] text-[#59645f]'">{{ folderCounts.archive ?? 0 }}</span>
+            <span class="rounded-full px-2 py-0.5 text-xs tabular-nums" :class="folder === 'archive' ? 'bg-ink text-canvas' : 'bg-chip text-ink-3'">{{ folderCounts.archive ?? 0 }}</span>
           </button>
           <button
-            class="flex items-center justify-between rounded-[12px] px-3 py-2.5 text-left text-sm font-medium transition"
-            :class="folder === 'trash' ? 'bg-[#18201d] text-[#f7f8f6]' : 'text-[#33413b] hover:bg-[#e4e9e5]'"
+            class="relative flex items-center justify-between rounded-[12px] px-3 py-2.5 pl-3.5 text-left text-sm font-medium transition"
+            :class="folder === 'trash' ? 'bg-surface-3 text-ink' : 'text-ink-2 hover:bg-chip'"
             type="button"
             @click="switchFolder('trash')"
           >
+            <span v-if="folder === 'trash'" class="absolute left-1 top-1/2 h-5 w-1 -translate-y-1/2 rounded-full bg-accent" aria-hidden="true"></span>
             <span>{{ t('inbox.trash') }}</span>
-            <span class="rounded-full px-2 py-0.5 text-xs tabular-nums" :class="folder === 'trash' ? 'bg-white/15' : 'bg-[#e4e9e5] text-[#59645f]'">{{ folderCounts.trash ?? 0 }}</span>
+            <span class="rounded-full px-2 py-0.5 text-xs tabular-nums" :class="folder === 'trash' ? 'bg-ink text-canvas' : 'bg-chip text-ink-3'">{{ folderCounts.trash ?? 0 }}</span>
           </button>
         </nav>
 
-        <div class="mt-auto space-y-4 border-t border-[#dce2de] p-4">
+        <div class="mt-auto space-y-4 border-t border-line p-4">
           <div>
-            <div class="mb-1.5 flex items-center justify-between text-xs text-[#69746e]">
+            <div class="mb-1.5 flex items-center justify-between text-xs text-ink-4">
               <span>{{ t('inbox.storage') }}</span>
               <span class="tabular-nums">{{ formatSize(quotaUsed) }} / {{ formatSize(quotaLimit) }}</span>
             </div>
-            <div class="h-1.5 overflow-hidden rounded-full bg-[#e4e9e5]">
+            <div class="h-1.5 overflow-hidden rounded-full bg-chip">
               <div
                 class="h-full rounded-full transition-all duration-300"
-                :class="quotaOver ? 'bg-[#d85e32]' : 'bg-[#2e6c43]'"
+                :class="quotaOver ? 'bg-accent-strong' : 'bg-success'"
                 :style="{ width: quotaPercent + '%' }"
               ></div>
             </div>
-            <p v-if="quotaOver" class="mt-1.5 text-xs text-[#d85e32]">{{ t('inbox.quotaWarning') }}</p>
+            <p v-if="quotaOver" class="mt-1.5 text-xs text-accent-strong">{{ t('inbox.quotaWarning') }}</p>
           </div>
 
-          <div class="rounded-[12px] bg-[#eef2ef] p-3">
-            <p class="truncate text-xs font-medium text-[#59645f]">{{ t('inbox.currentAddress') }}</p>
+          <div class="rounded-[12px] bg-surface-3 p-3">
+            <p class="truncate text-xs font-medium text-ink-3">{{ t('inbox.currentAddress') }}</p>
             <p class="mt-1 truncate text-sm font-medium">{{ fullAddress }}</p>
             <button
-              class="mt-2 text-xs font-medium text-[#d85e32] underline-offset-2 hover:underline"
+              class="mt-2 text-xs font-medium text-accent-strong underline-offset-2 hover:underline"
               type="button"
               @click="copyAddress"
             >{{ copyHint || t('inbox.copyToClipboard') }}</button>
           </div>
 
           <button
-            class="w-full rounded-[12px] border border-[#f0c9bb] bg-[#fff8f5] px-3 py-2 text-left text-xs font-medium text-[#9b3718] transition hover:bg-[#fff0ea] disabled:opacity-50"
+            class="w-full rounded-[12px] border border-danger/40 bg-surface px-3 py-2 text-left text-xs font-medium text-danger transition hover:bg-error-bg disabled:opacity-50"
             type="button"
             :disabled="deletingMailbox"
             @click="deleteMailbox"
           >{{ deletingMailbox ? t('inbox.deletingMailbox') : t('inbox.deleteMailbox') }}</button>
         </div>
+
+        <div class="flex items-center justify-between gap-2 border-t border-line p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] md:hidden">
+          <LocaleSwitcher />
+          <button
+            class="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium text-ink-3 transition hover:bg-chip hover:text-ink active:translate-y-px"
+            type="button"
+            @click="logout(true)"
+          >
+            <svg class="size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+            {{ t('inbox.logout') }}
+          </button>
+        </div>
       </aside>
 
       <!-- List pane -->
       <section
-        class="flex w-full min-w-0 flex-col border-r border-[#dce2de] bg-[#f7f8f6] md:w-[360px] md:shrink-0 lg:w-[400px]"
+        class="flex w-full min-w-0 flex-col border-r border-line bg-canvas md:w-[360px] md:shrink-0 lg:w-[400px]"
         :class="mobilePane === 'detail' ? 'hidden md:flex' : 'flex'"
       >
-        <div class="shrink-0 space-y-3 border-b border-[#dce2de] p-3">
+        <div class="shrink-0 space-y-3 border-b border-line p-3">
           <div class="flex items-center justify-between">
             <h2 class="text-sm font-semibold">
               {{
@@ -1323,19 +1511,19 @@ onUnmounted(() => {
                 : t('inbox.listTitleAll')
               }}
             </h2>
-            <span class="text-xs tabular-nums text-[#69746e]">
+            <span class="text-xs tabular-nums text-ink-4">
               {{ searchActive ? t('inbox.listFiltered', { count: matchedTotal }) : t('inbox.listCount', { count: `${emails.length}${hasMore ? '+' : ''}` }) }}
             </span>
           </div>
           <label class="relative block">
             <span class="sr-only">{{ t('inbox.search') }}</span>
-            <svg class="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-[#9ca9a2]" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <svg class="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-ink-5" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
               <circle cx="11" cy="11" r="7" />
               <path d="m20 20-3.5-3.5" stroke-linecap="round" />
             </svg>
             <input
               v-model="searchQuery"
-              class="w-full rounded-[12px] border border-[#cfd5d1] bg-white py-2.5 pl-9 pr-3 text-sm outline-none transition placeholder:text-[#9ca9a2] focus:border-[#e66d40] focus:ring-2 focus:ring-[#e66d40]/20"
+              class="w-full rounded-[12px] border border-line-2 bg-surface py-2.5 pl-9 pr-3 text-base outline-none transition placeholder:text-ink-5 focus:border-accent focus:ring-2 focus:ring-accent/20 sm:text-sm"
               type="search"
               :placeholder="t('inbox.searchPlaceholder')"
               autocomplete="off"
@@ -1343,29 +1531,29 @@ onUnmounted(() => {
           </label>
         </div>
 
-        <p v-if="inboxError" class="mx-3 mt-3 shrink-0 rounded-[12px] bg-[#fff0ea] px-3 py-2.5 text-sm text-[#9b3718]" role="alert">
+        <p v-if="inboxError" class="mx-3 mt-3 shrink-0 rounded-[12px] bg-error-bg px-3 py-2.5 text-sm text-danger" role="alert">
           {{ inboxError }}
         </p>
 
-        <div ref="listRef" class="min-h-0 flex-1 overflow-y-auto">
+        <div ref="listRef" class="lm-scroll min-h-0 flex-1 overflow-y-auto">
           <div v-if="inboxLoading" class="space-y-2 p-3">
-            <div v-for="n in 6" :key="n" class="h-[72px] animate-pulse rounded-[14px] bg-[#e4e9e5]"></div>
+            <div v-for="n in 6" :key="n" class="lm-skeleton h-[72px] rounded-[14px]"></div>
           </div>
 
           <div
             v-else-if="filteredEmails.length === 0"
             class="flex h-full min-h-[240px] flex-col items-center justify-center px-6 py-16 text-center"
           >
-            <div class="mb-4 grid size-14 place-items-center rounded-2xl bg-[#e4e9e5] text-[#59645f]">
+            <div class="mb-4 grid size-14 place-items-center rounded-2xl bg-chip text-ink-3">
               <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
                 <path d="M4 6h16v12H4z" stroke-linejoin="round" />
                 <path d="m4 8 8 6 8-6" stroke-linecap="round" stroke-linejoin="round" />
               </svg>
             </div>
-            <p class="font-medium text-[#33413b]">
+            <p class="font-medium text-ink-2">
               {{ searchQuery.trim() ? t('inbox.noMatchTitle') : folder === 'unread' ? t('inbox.noUnreadTitle') : t('inbox.emptyTitle') }}
             </p>
-            <p class="mt-2 max-w-[240px] text-sm leading-6 text-[#69746e]">
+            <p class="mt-2 max-w-[240px] text-sm leading-6 text-ink-4">
               {{
                 searchQuery.trim()
                   ? t('inbox.noMatchHint')
@@ -1376,11 +1564,11 @@ onUnmounted(() => {
             </p>
           </div>
 
-          <ul v-else class="divide-y divide-[#e4e9e5]" role="listbox" :aria-label="t('inbox.emailList')">
+          <ul v-else class="divide-y divide-line/70" role="listbox" :aria-label="t('inbox.emailList')">
             <li v-for="email in filteredEmails" :key="email.id">
               <button
-                class="flex w-full gap-3 px-3 py-3.5 text-left transition"
-                :class="selectedId === email.id ? 'bg-[#e8efe8]' : 'hover:bg-[#eef2ef]'"
+                class="flex w-full gap-3 px-3 py-3.5 text-left transition hover:bg-surface-3"
+                :class="selectedId === email.id ? 'bg-surface-3 shadow-[inset_3px_0_0_0_var(--lm-accent)]' : ''"
                 type="button"
                 role="option"
                 :aria-selected="selectedId === email.id"
@@ -1389,29 +1577,29 @@ onUnmounted(() => {
               >
                 <span
                   class="mt-0.5 grid size-9 shrink-0 place-items-center rounded-full text-xs font-semibold"
-                  :class="email.isRead ? 'bg-[#e4e9e5] text-[#59645f]' : 'bg-[#f4ddd3] text-[#9b3718]'"
+                  :class="email.isRead ? 'bg-chip text-ink-3' : 'bg-card-2 text-danger'"
                   aria-hidden="true"
                 >{{ senderInitial(email) }}</span>
                 <span class="min-w-0 flex-1">
                   <span class="flex items-start justify-between gap-2">
                     <span
                       class="truncate text-sm"
-                      :class="email.isRead ? 'font-medium text-[#59645f]' : 'font-semibold text-[#18201d]'"
+                      :class="email.isRead ? 'font-medium text-ink-3' : 'font-semibold text-ink'"
                     >{{ displayName(email) }}{{ email.isStarred ? ' ★' : '' }}</span>
-                    <span class="shrink-0 text-[11px] tabular-nums text-[#9ca9a2]">{{ formatTime(email.receivedAt) }}</span>
+                    <span class="shrink-0 text-[11px] tabular-nums text-ink-5">{{ formatTime(email.receivedAt) }}</span>
                   </span>
                   <span class="mt-0.5 flex items-center gap-1.5">
                     <span
                       v-if="!email.isRead"
-                      class="size-1.5 shrink-0 rounded-full bg-[#e66d40]"
+                      class="size-1.5 shrink-0 rounded-full bg-accent"
                       :aria-label="t('inbox.unreadDot')"
                     ></span>
                     <span
                       class="truncate text-sm"
-                      :class="email.isRead ? 'text-[#69746e]' : 'font-medium text-[#33413b]'"
+                      :class="email.isRead ? 'text-ink-4' : 'font-medium text-ink-2'"
                     >{{ email.subject || t('inbox.noSubject') }}</span>
                   </span>
-                  <span class="mt-0.5 block text-[11px] text-[#9ca9a2]">{{ formatSize(email.size) }}</span>
+                  <span class="mt-0.5 block text-[11px] text-ink-5">{{ formatSize(email.size) }}</span>
                 </span>
               </button>
             </li>
@@ -1419,7 +1607,7 @@ onUnmounted(() => {
 
           <div v-if="hasMore && !searchQuery.trim()" class="p-3">
             <button
-              class="w-full rounded-[12px] border border-[#cfd5d1] bg-white py-2.5 text-sm font-medium text-[#33413b] transition hover:bg-[#fafbfa] disabled:opacity-50 active:translate-y-px"
+              class="w-full rounded-[12px] border border-line-2 bg-surface py-2.5 text-sm font-medium text-ink-2 transition hover:bg-surface-2 disabled:opacity-50 active:translate-y-px"
               type="button"
               :disabled="loadingMore"
               @click="loadMore"
@@ -1427,25 +1615,25 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <p class="hidden shrink-0 border-t border-[#dce2de] px-3 py-2 text-[11px] text-[#9ca9a2] md:block">
+        <p class="hidden shrink-0 border-t border-line px-3 py-2 text-[11px] text-ink-5 md:block">
           {{ t('inbox.shortcuts') }}
         </p>
       </section>
 
       <!-- Reading pane -->
       <section
-        class="min-w-0 flex-1 flex-col bg-[#fafbfa]"
+        class="min-w-0 flex-1 flex-col bg-surface-2"
         :class="mobilePane === 'list' ? 'hidden md:flex' : 'flex'"
       >
         <div v-if="detailLoading" class="flex flex-1 items-center justify-center p-8">
-          <div class="h-8 w-8 animate-spin rounded-full border-2 border-[#dce2de] border-t-[#e66d40]" :aria-label="t('inbox.loading')"></div>
+          <div class="h-8 w-8 animate-spin rounded-full border-2 border-line border-t-accent" :aria-label="t('inbox.loading')"></div>
         </div>
 
         <template v-else-if="selected">
-          <div class="shrink-0 border-b border-[#dce2de] bg-[#f7f8f6] px-4 py-3 md:px-6">
+          <div class="shrink-0 border-b border-line bg-canvas px-4 py-3 md:px-6">
             <div class="mb-3 flex items-start gap-2 md:mb-4">
               <button
-                class="mt-0.5 grid size-9 shrink-0 place-items-center rounded-[10px] text-[#33413b] transition hover:bg-[#e4e9e5] md:hidden"
+                class="mt-0.5 grid size-9 shrink-0 place-items-center rounded-[10px] text-ink-2 transition hover:bg-chip md:hidden"
                 type="button"
                 :aria-label="t('inbox.backToList')"
                 @click="backToList"
@@ -1458,52 +1646,52 @@ onUnmounted(() => {
                 {{ selected.subject || t('inbox.noSubject') }}
               </h2>
               <div class="flex shrink-0 flex-wrap justify-end gap-1.5">
-                <button class="rounded-full border border-[#cfd5d1] px-3 py-1.5 text-xs font-medium text-[#33413b] transition hover:bg-white" type="button" @click="patchEmail(selected.id, { isStarred: !selected.isStarred })">{{ selected.isStarred ? t('inbox.unstar') : t('inbox.star') }}</button>
-                <button v-if="selected.folder !== 'archive'" class="rounded-full border border-[#cfd5d1] px-3 py-1.5 text-xs font-medium text-[#33413b] transition hover:bg-white" type="button" @click="patchEmail(selected.id, { folder: 'archive' })">{{ t('inbox.moveArchive') }}</button>
-                <button v-else class="rounded-full border border-[#cfd5d1] px-3 py-1.5 text-xs font-medium text-[#33413b] transition hover:bg-white" type="button" @click="patchEmail(selected.id, { folder: 'inbox' })">{{ t('inbox.moveInbox') }}</button>
-                <button v-if="selected.folder !== 'trash'" class="rounded-full border border-[#cfd5d1] px-3 py-1.5 text-xs font-medium text-[#33413b] transition hover:bg-white" type="button" @click="patchEmail(selected.id, { folder: 'trash' })">{{ t('inbox.moveTrash') }}</button>
-                <button class="rounded-full border border-[#cfd5d1] px-3 py-1.5 text-xs font-medium text-[#33413b] transition hover:bg-white" type="button" @click="downloadEml(selected.id)">{{ t('inbox.downloadEml') }}</button>
-                <button class="rounded-full bg-[#9b3718] px-3.5 py-1.5 text-xs font-medium text-white transition hover:bg-[#7d2a10] active:translate-y-px" type="button" @click="deleteEmail(selected.id)">{{ t('inbox.deleteEmail') }}</button>
+                <button class="rounded-full border border-line-2 px-3 py-1.5 text-xs font-medium text-ink-2 transition hover:bg-surface" type="button" @click="patchEmail(selected.id, { isStarred: !selected.isStarred })">{{ selected.isStarred ? t('inbox.unstar') : t('inbox.star') }}</button>
+                <button v-if="selected.folder !== 'archive'" class="rounded-full border border-line-2 px-3 py-1.5 text-xs font-medium text-ink-2 transition hover:bg-surface" type="button" @click="patchEmail(selected.id, { folder: 'archive' })">{{ t('inbox.moveArchive') }}</button>
+                <button v-else class="rounded-full border border-line-2 px-3 py-1.5 text-xs font-medium text-ink-2 transition hover:bg-surface" type="button" @click="patchEmail(selected.id, { folder: 'inbox' })">{{ t('inbox.moveInbox') }}</button>
+                <button v-if="selected.folder !== 'trash'" class="rounded-full border border-line-2 px-3 py-1.5 text-xs font-medium text-ink-2 transition hover:bg-surface" type="button" @click="patchEmail(selected.id, { folder: 'trash' })">{{ t('inbox.moveTrash') }}</button>
+                <button class="rounded-full border border-line-2 px-3 py-1.5 text-xs font-medium text-ink-2 transition hover:bg-surface" type="button" @click="downloadEml(selected.id)">{{ t('inbox.downloadEml') }}</button>
+                <button class="rounded-full bg-danger px-3.5 py-1.5 text-xs font-medium text-accent-ink transition hover:bg-danger-hover active:translate-y-px" type="button" @click="deleteEmail(selected.id)">{{ t('inbox.deleteEmail') }}</button>
               </div>
             </div>
 
             <div class="flex flex-wrap items-center gap-3">
               <span
-                class="grid size-10 shrink-0 place-items-center rounded-full bg-[#f4ddd3] text-sm font-semibold text-[#9b3718]"
+                class="grid size-10 shrink-0 place-items-center rounded-full bg-card-2 text-sm font-semibold text-danger"
                 aria-hidden="true"
               >{{ senderInitial(selected) }}</span>
               <div class="min-w-0 flex-1">
                 <p class="truncate text-sm font-medium">{{ displayName(selected) }}</p>
-                <p class="truncate text-xs text-[#69746e]" :title="selected.sender">{{ selected.sender }}</p>
+                <p class="truncate text-xs text-ink-4" :title="selected.sender">{{ selected.sender }}</p>
               </div>
-              <div class="w-full text-xs text-[#69746e] sm:w-auto sm:text-right">
+              <div class="w-full text-xs text-ink-4 sm:w-auto sm:text-right">
                 <p :title="formatFullTime(selected.receivedAt)">{{ formatFullTime(selected.receivedAt) }}</p>
                 <p class="mt-0.5 tabular-nums">{{ formatSize(selected.size) }}</p>
               </div>
             </div>
-            <dl v-if="selected.to?.length || selected.cc?.length || selected.messageId" class="mt-3 grid gap-1 text-xs text-[#69746e]">
-              <div v-if="selected.to?.length" class="flex gap-2"><dt class="shrink-0 text-[#9ca9a2]">{{ t('inbox.to') }}</dt><dd class="min-w-0 break-all">{{ selected.to.map((a) => a.name ? `${a.name} <${a.address}>` : a.address).join(', ') }}</dd></div>
-              <div v-if="selected.cc?.length" class="flex gap-2"><dt class="shrink-0 text-[#9ca9a2]">{{ t('inbox.cc') }}</dt><dd class="min-w-0 break-all">{{ selected.cc.map((a) => a.name ? `${a.name} <${a.address}>` : a.address).join(', ') }}</dd></div>
-              <div v-if="selected.messageId" class="flex gap-2"><dt class="shrink-0 text-[#9ca9a2]">{{ t('inbox.messageId') }}</dt><dd class="min-w-0 break-all font-mono text-[11px]">{{ selected.messageId }}</dd></div>
+            <dl v-if="selected.to?.length || selected.cc?.length || selected.messageId" class="mt-3 grid gap-1 text-xs text-ink-4">
+              <div v-if="selected.to?.length" class="flex gap-2"><dt class="shrink-0 text-ink-5">{{ t('inbox.to') }}</dt><dd class="min-w-0 break-all">{{ selected.to.map((a) => a.name ? `${a.name} <${a.address}>` : a.address).join(', ') }}</dd></div>
+              <div v-if="selected.cc?.length" class="flex gap-2"><dt class="shrink-0 text-ink-5">{{ t('inbox.cc') }}</dt><dd class="min-w-0 break-all">{{ selected.cc.map((a) => a.name ? `${a.name} <${a.address}>` : a.address).join(', ') }}</dd></div>
+              <div v-if="selected.messageId" class="flex gap-2"><dt class="shrink-0 text-ink-5">{{ t('inbox.messageId') }}</dt><dd class="min-w-0 break-all font-mono text-[11px]">{{ selected.messageId }}</dd></div>
             </dl>
             <div v-if="selected.attachments?.length" class="mt-2 flex flex-wrap gap-1.5">
-              <span class="text-[11px] text-[#9ca9a2]">{{ t('inbox.attachments') }}:</span>
-              <span v-for="(att, i) in selected.attachments" :key="i" class="rounded-full border border-[#dce2de] bg-white px-2 py-0.5 text-[11px]">{{ att.filename }} ({{ formatSize(att.size) }})</span>
+              <span class="text-[11px] text-ink-5">{{ t('inbox.attachments') }}:</span>
+              <span v-for="(att, i) in selected.attachments" :key="i" class="rounded-full border border-line bg-surface px-2 py-0.5 text-[11px]">{{ att.filename }} ({{ formatSize(att.size) }})</span>
             </div>
             <div v-if="selected.labels?.length" class="mt-2 flex flex-wrap gap-1">
-              <span v-for="lab in selected.labels" :key="lab" class="rounded-full bg-[#eef2ef] px-2 py-0.5 text-[11px] text-[#33413b]">{{ lab }}</span>
+              <span v-for="lab in selected.labels" :key="lab" class="rounded-full bg-surface-3 px-2 py-0.5 text-[11px] text-ink-2">{{ lab }}</span>
             </div>
 
-            <div v-if="hasHtmlBody && hasTextBody" class="mt-3 flex w-fit gap-1 rounded-[10px] bg-[#eef2ef] p-1">
+            <div v-if="hasHtmlBody && hasTextBody" class="mt-3 flex w-fit gap-1 rounded-[10px] bg-surface-3 p-1">
               <button
                 class="rounded-[8px] px-3 py-1 text-xs font-medium transition"
-                :class="bodyMode === 'html' ? 'bg-white shadow-sm text-[#18201d]' : 'text-[#59645f]'"
+                :class="bodyMode === 'html' ? 'bg-surface shadow-sm text-ink' : 'text-ink-3'"
                 type="button"
                 @click="bodyMode = 'html'"
               >{{ t('inbox.htmlBody') }}</button>
               <button
                 class="rounded-[8px] px-3 py-1 text-xs font-medium transition"
-                :class="bodyMode === 'text' ? 'bg-white shadow-sm text-[#18201d]' : 'text-[#59645f]'"
+                :class="bodyMode === 'text' ? 'bg-surface shadow-sm text-ink' : 'text-ink-3'"
                 type="button"
                 @click="bodyMode = 'text'"
               >{{ t('inbox.textBody') }}</button>
@@ -1518,7 +1706,7 @@ onUnmounted(() => {
             ></div>
             <pre
               v-else
-              class="mx-auto max-w-3xl whitespace-pre-wrap break-words font-sans text-[15px] leading-7 text-[#33413b]"
+              class="lm-scroll mx-auto max-w-3xl whitespace-pre-wrap break-words font-sans text-[15px] leading-7 text-ink-2"
             >{{ selected.bodyText || t('inbox.noBody') }}</pre>
           </div>
         </template>
@@ -1527,14 +1715,14 @@ onUnmounted(() => {
           v-else
           class="flex flex-1 flex-col items-center justify-center px-6 py-16 text-center"
         >
-          <div class="mb-5 grid size-16 place-items-center rounded-[20px] bg-[#e8efe8] text-[#59645f]">
+          <div class="mb-5 grid size-16 place-items-center rounded-[20px] bg-hero-glow text-ink-3">
             <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
               <path d="M4 6h16v12H4z" stroke-linejoin="round" />
               <path d="m4 8 8 6 8-6" stroke-linecap="round" stroke-linejoin="round" />
             </svg>
           </div>
           <p class="text-lg font-semibold tracking-tight">{{ t('inbox.noSelectionTitle') }}</p>
-          <p class="mt-2 max-w-xs text-sm leading-6 text-[#69746e]">
+          <p class="mt-2 max-w-xs text-sm leading-6 text-ink-4">
             {{ t('inbox.noSelectionHint') }}
           </p>
         </div>
@@ -1542,73 +1730,77 @@ onUnmounted(() => {
     </div>
 
     <!-- Settings panel -->
-    <div v-if="settingsOpen" class="fixed inset-0 z-[90] flex justify-end bg-[#18201d]/30" @click.self="settingsOpen = false">
-      <div class="flex h-full w-full max-w-md flex-col border-l border-[#dce2de] bg-[#f7f8f6] shadow-[-12px_0_40px_rgba(41,65,53,0.08)]">
-        <div class="flex items-center justify-between border-b border-[#dce2de] px-5 py-4">
-          <h2 class="text-lg font-semibold tracking-tight">{{ t('inbox.settings') }}</h2>
-          <button class="rounded-full px-3 py-1.5 text-sm text-[#59645f] hover:bg-[#e4e9e5]" type="button" @click="settingsOpen = false">{{ t('inbox.close') }}</button>
-        </div>
-        <div class="min-h-0 flex-1 space-y-8 overflow-y-auto p-5">
+    <Transition name="lm-fade">
+      <div v-if="settingsOpen" class="fixed inset-0 z-[90] flex justify-end bg-ink/30" @click.self="settingsOpen = false">
+        <div class="lm-slide-panel flex h-full w-full max-w-md flex-col border-l border-line bg-canvas shadow-[-12px_0_40px_rgba(41,65,53,0.08)]">
+          <div class="flex items-center justify-between border-b border-line px-5 py-4">
+            <h2 class="text-lg font-semibold tracking-tight">{{ t('inbox.settings') }}</h2>
+            <button class="rounded-full px-3 py-1.5 text-sm text-ink-3 hover:bg-chip" type="button" @click="settingsOpen = false">{{ t('inbox.close') }}</button>
+          </div>
+          <div class="lm-scroll min-h-0 flex-1 space-y-8 overflow-y-auto p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))]">
           <section>
             <h3 class="mb-2 text-sm font-semibold">{{ t('inbox.exportJson') }} / mbox</h3>
             <div class="flex flex-wrap gap-2">
-              <button class="rounded-full border border-[#cfd5d1] bg-white px-3 py-2 text-xs font-medium" type="button" @click="exportMailbox('json')">{{ t('inbox.exportJson') }}</button>
-              <button class="rounded-full border border-[#cfd5d1] bg-white px-3 py-2 text-xs font-medium" type="button" @click="exportMailbox('mbox')">{{ t('inbox.exportMbox') }}</button>
+              <button class="rounded-full border border-line-2 bg-surface px-3 py-2 text-xs font-medium" type="button" @click="exportMailbox('json')">{{ t('inbox.exportJson') }}</button>
+              <button class="rounded-full border border-line-2 bg-surface px-3 py-2 text-xs font-medium" type="button" @click="exportMailbox('mbox')">{{ t('inbox.exportMbox') }}</button>
             </div>
           </section>
           <section>
             <h3 class="mb-1 text-sm font-semibold">{{ t('filters.title') }}</h3>
-            <p class="mb-3 text-xs text-[#69746e]">{{ t('filters.hint') }}</p>
+            <p class="mb-3 text-xs text-ink-4">{{ t('filters.hint') }}</p>
             <form class="grid gap-2" @submit.prevent="createFilter">
-              <select v-model="filterField" class="rounded-[10px] border border-[#cfd5d1] bg-white px-3 py-2 text-sm">
+              <select v-model="filterField" class="rounded-[10px] border border-line-2 bg-surface px-3 py-2 text-sm">
                 <option value="sender">{{ t('filters.fields.sender') }}</option>
                 <option value="subject">{{ t('filters.fields.subject') }}</option>
                 <option value="body">{{ t('filters.fields.body') }}</option>
               </select>
-              <select v-model="filterOp" class="rounded-[10px] border border-[#cfd5d1] bg-white px-3 py-2 text-sm">
+              <select v-model="filterOp" class="rounded-[10px] border border-line-2 bg-surface px-3 py-2 text-sm">
                 <option value="contains">{{ t('filters.ops.contains') }}</option>
                 <option value="equals">{{ t('filters.ops.equals') }}</option>
               </select>
-              <input v-model="filterValue" class="rounded-[10px] border border-[#cfd5d1] bg-white px-3 py-2 text-sm" :placeholder="t('filters.value')" />
-              <select v-model="filterAction" class="rounded-[10px] border border-[#cfd5d1] bg-white px-3 py-2 text-sm">
+              <input v-model="filterValue" class="rounded-[10px] border border-line-2 bg-surface px-3 py-2 text-sm" :placeholder="t('filters.value')" />
+              <select v-model="filterAction" class="rounded-[10px] border border-line-2 bg-surface px-3 py-2 text-sm">
                 <option value="star">{{ t('filters.actions.star') }}</option>
                 <option value="archive">{{ t('filters.actions.archive') }}</option>
                 <option value="mark_read">{{ t('filters.actions.mark_read') }}</option>
                 <option value="delete">{{ t('filters.actions.delete') }}</option>
                 <option value="label">{{ t('filters.actions.label') }}</option>
               </select>
-              <input v-model="filterName" class="rounded-[10px] border border-[#cfd5d1] bg-white px-3 py-2 text-sm" :placeholder="t('filters.namePlaceholder')" />
-              <p v-if="filterError" class="text-xs text-[#9b3718]">{{ filterError }}</p>
-              <button class="rounded-full bg-[#18201d] px-4 py-2 text-sm font-medium text-[#f7f8f6] disabled:opacity-60" type="submit" :disabled="filterSaving">{{ filterSaving ? t('filters.creating') : t('filters.create') }}</button>
+              <input v-model="filterName" class="rounded-[10px] border border-line-2 bg-surface px-3 py-2 text-sm" :placeholder="t('filters.namePlaceholder')" />
+              <p v-if="filterError" class="text-xs text-danger">{{ filterError }}</p>
+              <button class="rounded-full bg-ink px-4 py-2 text-sm font-medium text-canvas disabled:opacity-60" type="submit" :disabled="filterSaving">{{ filterSaving ? t('filters.creating') : t('filters.create') }}</button>
             </form>
             <ul class="mt-4 space-y-2">
-              <li v-if="filters.length === 0" class="text-xs text-[#9ca9a2]">{{ t('filters.empty') }}</li>
-              <li v-for="f in filters" :key="f.id" class="flex items-start justify-between gap-2 rounded-[12px] border border-[#dce2de] bg-white p-3 text-xs">
+              <li v-if="filters.length === 0" class="text-xs text-ink-5">{{ t('filters.empty') }}</li>
+              <li v-for="f in filters" :key="f.id" class="flex items-start justify-between gap-2 rounded-[12px] border border-line bg-surface p-3 text-xs">
                 <div class="min-w-0">
-                  <p class="font-medium text-[#18201d]">{{ f.matchField }} {{ f.matchOp }} “{{ f.matchValue }}” → {{ f.action }}</p>
-                  <p v-if="f.name" class="mt-0.5 text-[#69746e]">{{ f.name }}</p>
+                  <p class="font-medium text-ink">{{ f.matchField }} {{ f.matchOp }} “{{ f.matchValue }}” → {{ f.action }}</p>
+                  <p v-if="f.name" class="mt-0.5 text-ink-4">{{ f.name }}</p>
                 </div>
-                <button class="shrink-0 text-[#9b3718]" type="button" @click="deleteFilter(f.id)">{{ t('filters.remove') }}</button>
+                <button class="shrink-0 text-danger" type="button" @click="deleteFilter(f.id)">{{ t('filters.remove') }}</button>
               </li>
             </ul>
           </section>
         </div>
+        </div>
       </div>
-    </div>
+    </Transition>
   </div>
+
+  <div class="lm-noise" aria-hidden="true"></div>
 </template>
 
 <style scoped>
 .mail-body {
   line-height: 1.7;
-  color: #33413b;
+  color: var(--lm-ink-2);
   overflow-wrap: anywhere;
   word-break: break-word;
   font-size: 15px;
 }
 
 .mail-body :deep(a) {
-  color: #c24e22;
+  color: var(--lm-accent-strong);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
@@ -1633,8 +1825,8 @@ onUnmounted(() => {
 .mail-body :deep(blockquote) {
   margin: 0.75em 0;
   padding-left: 1em;
-  border-left: 3px solid #dce2de;
-  color: #59645f;
+  border-left: 3px solid var(--lm-line);
+  color: var(--lm-ink-3);
 }
 
 .mail-body :deep(p) {
@@ -1647,6 +1839,6 @@ onUnmounted(() => {
   margin: 1em 0 0.4em;
   line-height: 1.3;
   font-weight: 600;
-  color: #18201d;
+  color: var(--lm-ink);
 }
 </style>

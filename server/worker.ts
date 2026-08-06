@@ -54,6 +54,11 @@ const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const PBKDF2_ITERATIONS = 100_000
 const RATE_WINDOW_LOGIN_MS = 15 * 60 * 1000
 const RATE_WINDOW_CREATE_MS = 60 * 60 * 1000
+/** Anti-abuse: same device may own at most one mailbox. */
+const ABUSE_IP_LIMIT_NO_FINGERPRINT = 3
+const ABUSE_IP_LIMIT_TOTAL = 8
+
+type RegistrationStatus = 'accepted' | 'rejected_device' | 'rejected_ip' | 'rejected_other'
 
 type MailboxRow = {
   id: string
@@ -423,9 +428,23 @@ app.get('/api/health', (c) =>
   }),
 )
 
+async function recordRegistration(
+  db: D1Database,
+  localPart: string,
+  deviceId: string | null,
+  ip: string,
+  status: RegistrationStatus,
+): Promise<void> {
+  await db
+    .prepare('INSERT INTO registrations (id, local_part, device_id, ip, status, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .bind(crypto.randomUUID(), localPart, deviceId, ip, status, new Date().toISOString())
+    .run()
+}
+
 app.post('/api/mailboxes', zValidator('json', mailboxInput), async (c) => {
   const input = c.req.valid('json')
   const ip = requestClientIp(c)
+  const deviceId = (c.req.header('device-id') ?? '').trim().slice(0, 128) || null
 
   const createPerHour = parsePositiveInt(c.env.MAILBOX_CREATE_PER_IP_HOUR, 3)
   if (!(await consumeRateLimit(c.env.DB, `create:ip:${ip}`, createPerHour, RATE_WINDOW_CREATE_MS))) {
@@ -461,14 +480,39 @@ app.post('/api/mailboxes', zValidator('json', mailboxInput), async (c) => {
     .first()
   if (blocked) return c.json({ code: 'prefix_blocked' }, 403)
 
+  // ── Anti-abuse: one person, one mailbox ──
+  const countByIp = async (): Promise<number> => {
+    const row = await c.env.DB.prepare('SELECT COUNT(*) AS n FROM mailboxes WHERE creator_ip = ?').bind(ip).first<{ n: number }>()
+    return row?.n ?? 0
+  }
+
+  if (deviceId) {
+    // R1: the same device already owns a mailbox
+    const owned = await c.env.DB.prepare('SELECT id FROM mailboxes WHERE device_id = ?').bind(deviceId).first()
+    if (owned) {
+      await recordRegistration(c.env.DB, localPart, deviceId, ip, 'rejected_device')
+      return c.json({ code: 'abuse.device_exists' }, 409)
+    }
+  } else if ((await countByIp()) >= ABUSE_IP_LIMIT_NO_FINGERPRINT) {
+    // R2: no fingerprint — only a small IP allowance
+    await recordRegistration(c.env.DB, localPart, null, ip, 'rejected_ip')
+    return c.json({ code: 'abuse.ip_limit' }, 409)
+  }
+
+  if ((await countByIp()) >= ABUSE_IP_LIMIT_TOTAL) {
+    // R3: absolute IP ceiling regardless of fingerprint
+    await recordRegistration(c.env.DB, localPart, deviceId, ip, 'rejected_ip')
+    return c.json({ code: 'abuse.ip_limit' }, 409)
+  }
+
   const salt = crypto.getRandomValues(new Uint8Array(16))
   const passwordHash = await hashPassword(input.password, salt)
   const mailbox = { id: crypto.randomUUID(), localPart, createdAt: new Date().toISOString() }
   try {
     await c.env.DB.prepare(
-      'INSERT INTO mailboxes (id, local_part, password_salt, password_hash, created_at, used_bytes) VALUES (?, ?, ?, ?, ?, 0)',
+      'INSERT INTO mailboxes (id, local_part, password_salt, password_hash, created_at, used_bytes, device_id, creator_ip) VALUES (?, ?, ?, ?, ?, 0, ?, ?)',
     )
-      .bind(mailbox.id, localPart, toHex(salt), passwordHash, mailbox.createdAt)
+      .bind(mailbox.id, localPart, toHex(salt), passwordHash, mailbox.createdAt, deviceId, ip)
       .run()
   } catch (err) {
     if (err instanceof Error && err.message.includes('UNIQUE constraint failed')) {
@@ -476,6 +520,7 @@ app.post('/api/mailboxes', zValidator('json', mailboxInput), async (c) => {
     }
     throw err
   }
+  await recordRegistration(c.env.DB, localPart, deviceId, ip, 'accepted')
   const session = await issueSession(c.env.DB, mailbox.id)
   return c.json({ ...mailbox, token: session.token, expiresAt: session.expiresAt }, 201)
 })
@@ -996,6 +1041,26 @@ app.delete('/api/admin/blocked-prefixes/:localPart', adminAuth, async (c) => {
     .run()
   if (result.meta.changes === 0) return c.json({ code: 'not_found' }, 404)
   return c.body(null, 204)
+})
+
+app.get('/api/admin/registrations', adminAuth, async (c) => {
+  const limit = Math.min(Math.max(parseInt(c.req.query('limit') ?? '50', 10) || 50, 1), 200)
+  const offset = Math.max(parseInt(c.req.query('offset') ?? '0', 10) || 0, 0)
+  const { results } = await c.env.DB.prepare(
+    'SELECT local_part AS localPart, device_id AS deviceId, ip, status, created_at AS createdAt FROM registrations ORDER BY created_at DESC LIMIT ? OFFSET ?',
+  )
+    .bind(limit, offset)
+    .all()
+  const total = await c.env.DB.prepare('SELECT COUNT(*) AS n FROM registrations').first<{ n: number }>()
+  return c.json({ registrations: results, total: total?.n ?? 0 })
+})
+
+app.post('/api/admin/mailboxes/:id/unbind', adminAuth, async (c) => {
+  const result = await c.env.DB.prepare('UPDATE mailboxes SET device_id = NULL WHERE id = ?')
+    .bind(c.req.param('id'))
+    .run()
+  if (result.meta.changes === 0) return c.json({ code: 'not_found' }, 404)
+  return c.json({ ok: true })
 })
 
 function parseLocalPart(recipient: string | string[] | undefined, domain: string | undefined): string | null {
