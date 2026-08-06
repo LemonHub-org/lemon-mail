@@ -12,15 +12,14 @@ export default {
     install: 'Install app',
   },
   hero: {
-    badge: 'Your domain, your mailbox',
-    heading: 'Give every identity its own address.',
+    kicker: 'Domain mailboxes, ready in seconds',
+    heading1: 'Every identity',
+    heading2: 'deserves its own address.',
     tagline: 'Create a private mailbox on lemonhub.net, hosted right here. Each address has its own password and a 10 MB quota — nothing is public.',
     create: 'Create a mailbox',
     login: 'Open inbox',
-    alt: 'Abstract paper-art of letters converging on one domain',
   },
   trustBar: {
-    text: 'Mailbox addresses are never listed — only you know your entry.',
     password: 'Per-address password',
     hosting: 'Email hosting',
     recent: 'Recent on this device',
@@ -80,9 +79,9 @@ export default {
   how: {
     sectionTitle: 'Three steps, each in its place',
     sectionTagline: 'From naming to hosting to control — every address stays clear and independent.',
-    naming: { kicker: 'Naming', title: 'Pick a name', body: 'Work, bills, communities — or any scenario you want to keep separate.' },
-    hosting: { kicker: 'Hosting', title: 'Mail delivered directly', body: 'Mail lands straight in your inbox here — no third-party forwarding.' },
-    privacy: { kicker: 'Privacy', title: 'Addresses stay private', body: 'Only those who know the prefix and password can open the mailbox.' },
+    naming: { title: 'Pick a name', body: 'Work, bills, communities — or any scenario you want to keep separate.' },
+    hosting: { title: 'Mail delivered directly', body: 'Mail lands straight in your inbox here — no third-party forwarding.' },
+    privacy: { title: 'Addresses stay private', body: 'Only those who know the prefix and password can open the mailbox.' },
   },
   footer: {
     copyright: '© 2026 Lemon Mail',

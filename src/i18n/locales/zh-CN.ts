@@ -12,15 +12,14 @@ export default {
     install: '安装应用',
   },
   hero: {
-    badge: '你的域名，你的邮箱',
-    heading: '让每一个身份，都有自己的地址。',
+    kicker: '域名邮箱 · 即建即用',
+    heading1: '让每一个身份，',
+    heading2: '都有自己的地址。',
     tagline: '用 lemonhub.net 创建专属邮箱，邮件直接托管在本站。每个地址独立密码与 10MB 配额，互不公开。',
     create: '创建一个邮箱',
     login: '登录收件箱',
-    alt: '多封信件汇聚于同一个域名的抽象纸艺画面',
   },
   trustBar: {
-    text: '邮箱地址互不公示，只有你知道自己的入口。',
     password: '独立密码',
     hosting: '邮件托管',
     recent: '本机最近记录',
@@ -80,9 +79,9 @@ export default {
   how: {
     sectionTitle: '三个步骤，各归其位',
     sectionTagline: '从命名到托管再到掌控，每个地址都清晰独立。',
-    naming: { kicker: '命名', title: '取一个名字', body: '工作、账单、社区或任何你想区分的场景。' },
-    hosting: { kicker: '托管', title: '邮件直达', body: '邮件直接进入本站收件箱，不经过第三方转发。' },
-    privacy: { kicker: '隐私', title: '地址不公示', body: '只有知道前缀与密码的人才能进入对应收件箱。' },
+    naming: { title: '取一个名字', body: '工作、账单、社区或任何你想区分的场景。' },
+    hosting: { title: '邮件直达', body: '邮件直接进入本站收件箱，不经过第三方转发。' },
+    privacy: { title: '地址不公示', body: '只有知道前缀与密码的人才能进入对应收件箱。' },
   },
   footer: {
     copyright: '© 2026 Lemon Mail',

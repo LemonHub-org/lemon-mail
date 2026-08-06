@@ -16,16 +16,12 @@ function switchLocale(next: AppLocale) {
 </script>
 
 <template>
-  <div
-    class="flex items-center gap-0.5 rounded-full border border-line-2 p-0.5 text-xs font-medium"
-    role="group"
-    aria-label="语言 / Language"
-  >
+  <div class="flex items-baseline gap-2 text-xs font-medium" role="group" aria-label="语言 / Language">
     <button
       v-for="option in options"
       :key="option.value"
-      class="rounded-full px-2.5 py-1 transition"
-      :class="locale === option.value ? 'bg-ink text-canvas' : 'text-ink-3 hover:text-ink'"
+      class="transition"
+      :class="locale === option.value ? 'text-ink underline underline-offset-4 decoration-accent decoration-2' : 'text-ink-4 hover:text-ink'"
       type="button"
       @click="switchLocale(option.value)"
     >{{ option.label }}</button>

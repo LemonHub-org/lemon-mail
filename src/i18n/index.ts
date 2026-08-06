@@ -55,3 +55,11 @@ export function setLocale(next: AppLocale): void {
     /* ignore */
   }
 }
+
+export function gt<K extends MessageKey>(key: K, named?: Record<string, string | number>): string {
+  return i18n.global.t(key as never, named as never) as string
+}
+
+export function gte(key: string): boolean {
+  return i18n.global.te(key as never)
+}

@@ -5,65 +5,58 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
-  --lm-canvas: #f7f8f6;
+  --lm-canvas: #fafaf8;
   --lm-surface: #ffffff;
-  --lm-surface-2: #fafbfa;
-  --lm-surface-3: #f1f4f1;
-  --lm-chip: #e4e9e5;
-  --lm-ink: #18201d;
-  --lm-ink-2: #33413b;
-  --lm-ink-3: #59645f;
-  --lm-ink-4: #69746e;
-  --lm-ink-5: #9ca9a2;
-  --lm-line: #dce2de;
-  --lm-line-2: #cfd5d1;
-  --lm-line-3: #c0c9c3;
-  --lm-accent: #e66d40;
-  --lm-accent-strong: #d85e32;
-  --lm-accent-hover: #ca5730;
-  --lm-accent-ink: #ffffff;
-  --lm-danger: #9b3718;
-  --lm-danger-hover: #7d2a10;
-  --lm-success: #2e6c43;
-  --lm-error-bg: #fff0ea;
-  --lm-success-bg: #edf6ef;
-  --lm-card-1: #dfe9e1;
-  --lm-card-2: #f4ddd3;
-  --lm-card-3: #e8ece9;
-  --lm-hero-glow: #e8efe8;
+  --lm-surface-2: #f5f4ef;
+  --lm-surface-3: #efeee7;
+  --lm-chip: #e9e7de;
+  --lm-ink: #1a1a14;
+  --lm-ink-2: #3f3f36;
+  --lm-ink-3: #6b6b60;
+  --lm-ink-4: #8f8f83;
+  --lm-ink-5: #adac9f;
+  --lm-line: #e6e4db;
+  --lm-line-2: #d9d6ca;
+  --lm-line-3: #c7c4b6;
+  --lm-accent: #efe23c;
+  --lm-accent-strong: #756c00;
+  --lm-accent-hover: #e2d22e;
+  --lm-accent-ink: #1a1a14;
+  --lm-danger: #c2402f;
+  --lm-danger-hover: #a33425;
+  --lm-success: #3e7c4f;
+  --lm-error-bg: #faf0ec;
+  --lm-success-bg: #eff5ee;
 }
 
 .dark {
-  --lm-canvas: #101412;
-  --lm-surface: #1a201d;
-  --lm-surface-2: #212824;
-  --lm-surface-3: #1d231f;
-  --lm-chip: #262e29;
-  --lm-ink: #e7ede9;
-  --lm-ink-2: #b9c5bd;
-  --lm-ink-3: #8a978e;
-  --lm-ink-4: #6b786f;
-  --lm-ink-5: #5c6860;
-  --lm-line: #2b322d;
-  --lm-line-2: #3a433c;
-  --lm-line-3: #46524a;
-  --lm-accent: #e66d40;
-  --lm-accent-strong: #f08a62;
-  --lm-accent-hover: #f0824f;
-  --lm-accent-ink: #ffffff;
-  --lm-danger: #e08a6a;
-  --lm-danger-hover: #c4795b;
-  --lm-success: #86c09c;
-  --lm-error-bg: #33201a;
-  --lm-success-bg: #1c2f23;
-  --lm-card-1: #1e2a22;
-  --lm-card-2: #33231c;
-  --lm-card-3: #222925;
-  --lm-hero-glow: rgba(38, 60, 48, 0.55);
+  --lm-canvas: #141411;
+  --lm-surface: #1c1c17;
+  --lm-surface-2: #242420;
+  --lm-surface-3: #2a2a24;
+  --lm-chip: #33332b;
+  --lm-ink: #edece2;
+  --lm-ink-2: #c8c7bb;
+  --lm-ink-3: #9c9b8f;
+  --lm-ink-4: #7a796e;
+  --lm-ink-5: #5e5d54;
+  --lm-line: #2b2b24;
+  --lm-line-2: #3a3930;
+  --lm-line-3: #4a493e;
+  --lm-accent: #efe23c;
+  --lm-accent-strong: #e4d74f;
+  --lm-accent-hover: #f5e954;
+  --lm-accent-ink: #1a1a14;
+  --lm-danger: #e07868;
+  --lm-danger-hover: #c96050;
+  --lm-success: #8fc49c;
+  --lm-error-bg: #35201b;
+  --lm-success-bg: #1f2e22;
 }
 
 @theme {
   --font-sans: "Outfit Variable", "Noto Sans SC Variable", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, "Noto Sans SC Variable", monospace;
   --color-canvas: var(--lm-canvas);
   --color-surface: var(--lm-surface);
   --color-surface-2: var(--lm-surface-2);
@@ -86,10 +79,6 @@
   --color-success: var(--lm-success);
   --color-error-bg: var(--lm-error-bg);
   --color-success-bg: var(--lm-success-bg);
-  --color-card-1: var(--lm-card-1);
-  --color-card-2: var(--lm-card-2);
-  --color-card-3: var(--lm-card-3);
-  --color-hero-glow: var(--lm-hero-glow);
 }
 
 :root {
@@ -116,8 +105,6 @@ body {
   background: var(--lm-canvas);
 }
 
-/* ── Touch devices ── */
-
 @media (pointer: coarse) {
   .lm-scroll {
     scrollbar-width: none;
@@ -130,11 +117,16 @@ body {
 
 #app { min-height: 100dvh; }
 
-button, input, textarea { font: inherit; }
+button, input, textarea, select { font: inherit; }
 
-button:focus-visible, input:focus-visible, a:focus-visible, textarea:focus-visible {
-  outline: 3px solid #f0794a;
-  outline-offset: 3px;
+button:focus-visible, input:focus-visible, a:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: 2px solid var(--lm-ink);
+  outline-offset: 2px;
+}
+
+.dark button:focus-visible, .dark input:focus-visible, .dark a:focus-visible,
+.dark textarea:focus-visible, .dark select:focus-visible {
+  outline-color: var(--lm-accent);
 }
 
 .sr-only {
@@ -160,12 +152,12 @@ button:focus-visible, input:focus-visible, a:focus-visible, textarea:focus-visib
 /* ── Motion ── */
 
 @keyframes lm-rise {
-  from { opacity: 0; transform: translateY(16px); }
+  from { opacity: 0; transform: translateY(14px); }
   to { opacity: 1; transform: none; }
 }
 
 .lm-rise {
-  animation: lm-rise 0.65s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: lm-rise 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 @keyframes lm-shimmer {
@@ -179,9 +171,18 @@ button:focus-visible, input:focus-visible, a:focus-visible, textarea:focus-visib
   animation: lm-shimmer 1.6s ease-in-out infinite;
 }
 
+@keyframes lm-ticker {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+.lm-ticker {
+  animation: lm-ticker 36s linear infinite;
+}
+
 .lm-fade-enter-active,
 .lm-fade-leave-active {
-  transition: opacity 0.25s ease;
+  transition: opacity 0.22s ease;
 }
 
 .lm-fade-enter-from,
@@ -195,7 +196,7 @@ button:focus-visible, input:focus-visible, a:focus-visible, textarea:focus-visib
 }
 
 .lm-slide-panel {
-  transition: transform 0.38s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: transform 0.34s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .theme-transition,
@@ -203,24 +204,31 @@ button:focus-visible, input:focus-visible, a:focus-visible, textarea:focus-visib
   transition:
     background-color 0.25s ease,
     color 0.25s ease,
-    border-color 0.25s ease,
-    box-shadow 0.25s ease !important;
+    border-color 0.25s ease !important;
 }
 
-/* ── Texture & polish ── */
+/* ── Editorial details ── */
+
+.lm-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--lm-ink-4);
+}
 
 .lm-noise {
   position: fixed;
   inset: 0;
   z-index: 60;
   pointer-events: none;
-  opacity: 0.028;
+  opacity: 0.025;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
 ::selection {
   background: var(--lm-accent);
-  color: #ffffff;
+  color: var(--lm-accent-ink);
 }
 
 .lm-scroll {
