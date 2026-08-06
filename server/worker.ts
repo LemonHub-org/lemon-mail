@@ -18,7 +18,6 @@ import {
   buildMbox,
   ftsIndex,
   ftsQuery,
-  ftsRemove,
   hardDeleteEmails,
   loadFilters,
   notifyWebhook,
@@ -59,6 +58,13 @@ const ABUSE_IP_LIMIT_NO_FINGERPRINT = 3
 const ABUSE_IP_LIMIT_TOTAL = 8
 
 type RegistrationStatus = 'accepted' | 'rejected_device' | 'rejected_ip' | 'rejected_other'
+
+type LogLevel = 'info' | 'warn' | 'error'
+
+/** Structured JSON log line — inspect via `wrangler tail`. */
+function log(level: LogLevel, event: string, fields: Record<string, unknown> = {}): void {
+  console.log(JSON.stringify({ ts: new Date().toISOString(), level, event, ...fields }))
+}
 
 type MailboxRow = {
   id: string
@@ -312,6 +318,17 @@ const app = new Hono<AppEnv>()
 
 app.use('/api/*', cors({ origin: 'https://mail.lemonhub.net' }))
 
+app.use('/api/*', async (c, next) => {
+  const start = Date.now()
+  await next()
+  log('info', 'api.request', { method: c.req.method, path: c.req.path, status: c.res.status, ms: Date.now() - start })
+})
+
+app.onError((err, c) => {
+  log('error', 'api.error', { method: c.req.method, path: c.req.path, message: err.message })
+  return c.json({ code: 'internal_error' }, 500)
+})
+
 const sessionAuth: MiddlewareHandler<AppEnv> = async (c, next) => {
   const auth = c.req.header('Authorization') ?? ''
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
@@ -491,17 +508,20 @@ app.post('/api/mailboxes', zValidator('json', mailboxInput), async (c) => {
     const owned = await c.env.DB.prepare('SELECT id FROM mailboxes WHERE device_id = ?').bind(deviceId).first()
     if (owned) {
       await recordRegistration(c.env.DB, localPart, deviceId, ip, 'rejected_device')
+      log('warn', 'mailbox.rejected', { code: 'abuse.device_exists', localPart, ip, deviceId })
       return c.json({ code: 'abuse.device_exists' }, 409)
     }
   } else if ((await countByIp()) >= ABUSE_IP_LIMIT_NO_FINGERPRINT) {
     // R2: no fingerprint — only a small IP allowance
     await recordRegistration(c.env.DB, localPart, null, ip, 'rejected_ip')
+    log('warn', 'mailbox.rejected', { code: 'abuse.ip_limit', localPart, ip })
     return c.json({ code: 'abuse.ip_limit' }, 409)
   }
 
   if ((await countByIp()) >= ABUSE_IP_LIMIT_TOTAL) {
     // R3: absolute IP ceiling regardless of fingerprint
     await recordRegistration(c.env.DB, localPart, deviceId, ip, 'rejected_ip')
+    log('warn', 'mailbox.rejected', { code: 'abuse.ip_limit_total', localPart, ip, deviceId })
     return c.json({ code: 'abuse.ip_limit' }, 409)
   }
 
@@ -521,6 +541,7 @@ app.post('/api/mailboxes', zValidator('json', mailboxInput), async (c) => {
     throw err
   }
   await recordRegistration(c.env.DB, localPart, deviceId, ip, 'accepted')
+  log('info', 'mailbox.created', { localPart, ip, deviceId })
   const session = await issueSession(c.env.DB, mailbox.id)
   return c.json({ ...mailbox, token: session.token, expiresAt: session.expiresAt }, 201)
 })
@@ -595,9 +616,11 @@ app.post('/api/auth/login', zValidator('json', loginByAddressInput), async (c) =
     .bind(localPartRaw)
     .first<MailboxRow>()
   if (!row || !(await verifyMailboxPassword(row, input.password))) {
+    log('warn', 'auth.login_failed', { localPart: localPartRaw, ip })
     return c.json({ code: 'wrong_credentials' }, 401)
   }
   const session = await issueSession(c.env.DB, row.id)
+  log('info', 'auth.login', { localPart: row.localPart, ip })
   return c.json({
     token: session.token,
     expiresAt: session.expiresAt,
@@ -1093,7 +1116,8 @@ async function readStream(stream: ReadableStream<Uint8Array>): Promise<Uint8Arra
 }
 
 async function handleEmail(message: ForwardableEmailMessage, env: Env, _ctx: ExecutionContext): Promise<void> {
-  const reject = (reason: string) => {
+  const reject = (reason: string, localPart?: string) => {
+    log('warn', 'email.rejected', { localPart, reason, size: message.rawSize, from: message.from })
     message.setReject(reason)
   }
 
@@ -1113,7 +1137,7 @@ async function handleEmail(message: ForwardableEmailMessage, env: Env, _ctx: Exe
     .bind(localPart)
     .first<{ id: string }>()
   if (!mailbox) {
-    reject('收件邮箱不存在。')
+    reject('收件邮箱不存在。', localPart)
     return
   }
 
@@ -1124,7 +1148,7 @@ async function handleEmail(message: ForwardableEmailMessage, env: Env, _ctx: Exe
     .bind(size, mailbox.id, size, limit)
     .run()
   if (reserve.meta.changes === 0) {
-    reject('邮箱配额已满。')
+    reject('邮箱配额已满。', localPart)
     return
   }
 
@@ -1157,6 +1181,7 @@ async function handleEmail(message: ForwardableEmailMessage, env: Env, _ctx: Exe
       await env.DB.prepare('UPDATE mailboxes SET used_bytes = MAX(0, used_bytes - ?) WHERE id = ?')
         .bind(size, mailbox.id)
         .run()
+      log('info', 'email.dropped_by_filter', { localPart, size })
       return
     }
 
@@ -1199,7 +1224,7 @@ async function handleEmail(message: ForwardableEmailMessage, env: Env, _ctx: Exe
         bodyText,
       })
     } catch (ftsErr) {
-      console.error('fts index failed', ftsErr)
+      log('error', 'email.fts_failed', { emailId, reason: ftsErr instanceof Error ? ftsErr.message : String(ftsErr) })
     }
 
     await notifyWebhook(env.MAIL_WEBHOOK_URL, {
@@ -1211,31 +1236,34 @@ async function handleEmail(message: ForwardableEmailMessage, env: Env, _ctx: Exe
       size,
       receivedAt,
     })
+    log('info', 'email.received', { localPart, emailId, sender, size, subject: subject.slice(0, 100) })
   } catch (err) {
     await env.DB.prepare('UPDATE mailboxes SET used_bytes = MAX(0, used_bytes - ?) WHERE id = ?')
       .bind(size, mailbox.id)
       .run()
-    reject('邮件处理失败。')
-    console.error('handleEmail failed', err)
+    log('error', 'email.failed', { localPart, reason: err instanceof Error ? err.message : String(err) })
+    reject('邮件处理失败。', localPart)
   }
 }
 
-async function cleanupExpiredSessions(db: D1Database): Promise<void> {
+async function cleanupExpiredSessions(db: D1Database): Promise<number> {
   const now = new Date().toISOString()
-  await db.prepare('DELETE FROM auth_sessions WHERE expires_at < ?').bind(now).run()
+  const sessions = await db.prepare('DELETE FROM auth_sessions WHERE expires_at < ?').bind(now).run()
   const dayAgo = Date.now() - 24 * 60 * 60 * 1000
   await db.prepare('DELETE FROM rate_limits WHERE window_start < ?').bind(dayAgo).run()
+  return sessions.meta.changes
 }
 
 export default {
   fetch: app.fetch,
   email: handleEmail,
   async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
-    await cleanupExpiredSessions(env.DB)
+    const purgedSessions = await cleanupExpiredSessions(env.DB)
     const maxAge = parsePositiveInt(env.EMAIL_MAX_AGE_DAYS, 0)
+    let purgedEmails = 0
     if (maxAge > 0) {
-      const n = await purgeOldEmails(env.DB, maxAge)
-      if (n > 0) console.log(`purged ${n} old emails (maxAgeDays=${maxAge})`)
+      purgedEmails = await purgeOldEmails(env.DB, maxAge)
     }
+    log('info', 'cron.run', { purgedSessions, maxAgeDays: maxAge, purgedEmails })
   },
 }

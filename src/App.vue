@@ -71,6 +71,7 @@ const landingTab = ref<LandingTab>('login')
 const recentMailboxes = ref<Mailbox[]>([])
 let installPrompt: BeforeInstallPromptEvent | null = null
 const installVisible = ref(false)
+const helpOpen = ref(false)
 
 const createLocalPart = ref('')
 const createPassword = ref('')
@@ -818,25 +819,85 @@ function onKeydown(e: KeyboardEvent) {
   if (view.value !== 'inbox') return
   const tag = (e.target as HTMLElement | null)?.tagName
   if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement | null)?.isContentEditable) return
+  if (e.key === '?') {
+    e.preventDefault()
+    helpOpen.value = true
+    return
+  }
+  if (e.key === 'Escape') {
+    if (helpOpen.value) {
+      helpOpen.value = false
+      return
+    }
+    if (selected.value && window.matchMedia('(max-width: 767px)').matches) {
+      backToList()
+    } else if (sidebarOpen.value) {
+      sidebarOpen.value = false
+    }
+    return
+  }
+  if ((e.key === 'Delete' || e.key === 'Backspace') && (e.metaKey || e.ctrlKey)) {
+    if (selectedId.value) {
+      e.preventDefault()
+      deleteEmail(selectedId.value)
+    }
+    return
+  }
+  if (e.metaKey || e.ctrlKey || e.altKey) return
   if (e.key === 'j' || e.key === 'ArrowDown') {
     e.preventDefault()
     selectAdjacent(1)
   } else if (e.key === 'k' || e.key === 'ArrowUp') {
     e.preventDefault()
     selectAdjacent(-1)
-  } else if (e.key === 'Escape') {
-    if (selected.value && window.matchMedia('(max-width: 767px)').matches) {
-      backToList()
-    } else if (sidebarOpen.value) {
-      sidebarOpen.value = false
-    }
-  } else if ((e.key === 'r' || e.key === 'R') && !e.metaKey && !e.ctrlKey) {
+  } else if (e.key === 'r' || e.key === 'R') {
     e.preventDefault()
     refreshInbox()
-  } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId.value && (e.metaKey || e.ctrlKey)) {
+  } else if (e.key === 'u') {
     e.preventDefault()
-    deleteEmail(selectedId.value)
+    if (selected.value) backToList()
+  } else if (selectedId.value) {
+    if (e.key === 'a') {
+      e.preventDefault()
+      patchEmail(selectedId.value, { folder: selected.value?.folder === 'archive' ? 'inbox' : 'archive' })
+    } else if (e.key === 's') {
+      e.preventDefault()
+      patchEmail(selectedId.value, { isStarred: !selected.value?.isStarred })
+    } else if (e.key === 'm') {
+      e.preventDefault()
+      patchEmail(selectedId.value, { folder: selected.value?.folder === 'trash' ? 'inbox' : 'trash' })
+    } else if (e.key === 'x') {
+      e.preventDefault()
+      toggleRead(selectedId.value)
+    } else if (folderKey(e.key)) {
+      e.preventDefault()
+      switchFolder(folderKey(e.key)!)
+    }
   }
+}
+
+function folderKey(key: string): Folder | undefined {
+  const map: Record<string, Folder> = { '1': 'inbox', '2': 'unread', '3': 'starred', '4': 'archive', '5': 'trash' }
+  return map[key]
+}
+
+async function toggleRead(emailId: string) {
+  if (!mailbox.value) return
+  const item = emails.value.find((em) => em.id === emailId)
+  const next = !(item?.isRead ?? selected.value?.isRead ?? false)
+  const response = await fetch(`${apiBase}/api/mailboxes/${mailbox.value.id}/emails/${emailId}/read`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${token.value}` },
+    body: JSON.stringify({ isRead: next }),
+  })
+  if (!response.ok) {
+    inboxError.value = t('inbox.readFailed')
+    return
+  }
+  if (item) item.isRead = next
+  if (selected.value?.id === emailId) selected.value.isRead = next
+  unread.value = Math.max(0, unread.value + (next ? -1 : 1))
+  if (mailbox.value) broadcastTabEvent({ type: 'inbox-changed', mailboxId: mailbox.value.id })
 }
 
 watch(folder, () => {
@@ -1782,6 +1843,37 @@ async function installApp() {
             </ul>
           </section>
         </div>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- Keyboard shortcuts help -->
+    <Transition name="lm-fade">
+      <div v-if="helpOpen" class="fixed inset-0 z-[90] flex items-center justify-center bg-ink/30 p-4" @click.self="helpOpen = false">
+        <div class="lm-slide-panel w-full max-w-md rounded-[20px] border border-line bg-canvas p-6 shadow-[0_30px_80px_rgba(41,65,53,0.16)]">
+          <div class="mb-4 flex items-center justify-between">
+            <h2 class="text-lg font-semibold tracking-tight">{{ t('keyboard.title') }}</h2>
+            <button class="rounded-full px-3 py-1.5 text-sm text-ink-3 transition hover:bg-chip" type="button" @click="helpOpen = false">{{ t('keyboard.close') }}</button>
+          </div>
+          <p class="mb-4 text-sm text-ink-4">{{ t('keyboard.hint') }}</p>
+          <ul class="space-y-2.5">
+            <li v-for="(label, key) in {
+              navigate: t('keyboard.navigate'),
+              back: t('keyboard.back'),
+              refresh: t('keyboard.refresh'),
+              star: t('keyboard.star'),
+              archive: t('keyboard.archive'),
+              trash: t('keyboard.trash'),
+              read: t('keyboard.read'),
+              folder: t('keyboard.folder'),
+              delete: t('keyboard.delete'),
+              help: t('keyboard.help'),
+              esc: t('keyboard.esc'),
+            }" :key="key" class="flex items-baseline justify-between gap-4 text-sm">
+              <span class="min-w-0 text-ink-2">{{ label }}</span>
+              <kbd class="shrink-0 rounded-[8px] border border-line-2 bg-surface-2 px-2 py-0.5 font-sans text-xs text-ink-2">{{ key === 'folder' ? '1-5' : key.toUpperCase() }}</kbd>
+            </li>
+          </ul>
         </div>
       </div>
     </Transition>

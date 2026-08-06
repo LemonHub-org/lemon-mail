@@ -3,11 +3,13 @@
 ## Commands
 
 - `npm run dev` — starts BOTH dev servers via concurrently: Vite on :5173 and `wrangler dev` (Workers runtime with local D1) on :8787. Frontend calls `/api/*`, which Vite proxies to :8787 (vite.config.ts).
-- `npm run typecheck` — `vue-tsc -b`; typechecks BOTH `src/` (tsconfig.app.json) and `server/` + `vite.config.ts` (tsconfig.node.json) via TS project references.
+- `npm run typecheck` — `vue-tsc -b`; typechecks BOTH `src/` (tsconfig.app.json, includes `tests/`) and `server/` + `vite.config.ts` (tsconfig.node.json) via TS project references.
+- `npm test` — `vitest run`; 34 tests in `tests/`: unit (local-part/theme/tabs) + worker API integration driven by `tests/helpers/mini-d1.ts` (in-memory D1). MiniD1 supports INSERT/SELECT/UPDATE/DELETE with WHERE/IN/COALESCE/GROUP BY/ORDER BY/LIMIT and UNIQUE via `uniqueCols`.
 - `npm run build` — `vue-tsc -b && vite build && npm run build:worker` (build includes typecheck). Frontend artifact: `dist/`; backend bundle: `dist-worker/worker.js` (`wrangler deploy --dry-run --outdir`, for inspection/CI — actual deploy re-bundles from source).
 - `npm run deploy` — `npm run build && npm run deploy:worker && npm run deploy:pages`; deploy:worker = `wrangler deploy`, deploy:pages = `wrangler pages deploy dist --project-name lemon-mail --branch main`.
+- Observability: every Worker event logs a JSON line via `log(level, event, fields)` in server/worker.ts — `api.request`/`api.error` middleware, `mailbox.created`/`mailbox.rejected`, `auth.login`/`auth.login_failed`, `email.received`/`email.rejected`/`email.dropped_by_filter`, `cron.run`. Inspect with `wrangler tail lemon-mail`; key events also visible in the Cloudflare Dashboard.
 - `npm run db:migrate` / `npm run db:migrate:local` — apply D1 migrations to remote / local database.
-- No lint or test tooling configured — don't invent `npm run lint` / `npm test`.
+- No lint tooling configured — don't invent `npm run lint`.
 
 ## Architecture
 
